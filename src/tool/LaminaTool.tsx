@@ -31,6 +31,7 @@ export function LaminaTool() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [saving, setSaving] = useState(false);
   const [lastSaved, setLastSaved] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const baseUrl = options.baseUrl || LAMINA_ORIGIN;
   const embedUrl = `${baseUrl}/embed?token=${encodeURIComponent(options.apiKey ?? '')}`;
@@ -44,19 +45,48 @@ export function LaminaTool() {
 
       if (msg.type === 'lamina:asset-ready' && msg.url) {
         setSaving(true);
+        setErrorMessage(null);
         try {
           const type = msg.mediaType === 'video' ? 'file' : 'image';
-          const response = await fetch(msg.url);
+
+          let response: Response;
+          try {
+            response = await fetch(msg.url);
+          } catch (fetchErr) {
+            const detail =
+              fetchErr instanceof TypeError
+                ? 'This is likely a CORS issue on cdn.uselamina.ai. Ask your Lamina admin to allow the Studio origin.'
+                : 'Network request failed.';
+            throw new Error(`Failed to download asset: ${detail}`);
+          }
+
+          if (!response.ok) {
+            throw new Error(
+              `Failed to download asset: HTTP ${response.status} ${response.statusText}`,
+            );
+          }
+
           const blob = await response.blob();
-          await sanityClient.assets.upload(type, blob, {
-            filename: msg.filename || `lamina-${msg.runId || 'asset'}`,
-            source: {
-              name: 'lamina',
-              id: msg.runId || '',
-            },
-          });
+
+          try {
+            await sanityClient.assets.upload(type, blob, {
+              filename: msg.filename || `lamina-${msg.runId || 'asset'}`,
+              source: {
+                name: 'lamina',
+                id: msg.runId || '',
+              },
+            });
+          } catch (uploadErr) {
+            const reason =
+              uploadErr instanceof Error ? uploadErr.message : 'Unknown error';
+            throw new Error(`Failed to upload asset to Sanity: ${reason}`);
+          }
+
           setLastSaved(msg.filename || msg.runId || 'asset');
         } catch (err) {
+          const message =
+            err instanceof Error ? err.message : 'Failed to save asset.';
+          setErrorMessage(message);
           console.error('[sanity-plugin-lamina] Failed to save asset:', err);
         } finally {
           setSaving(false);
@@ -96,6 +126,11 @@ export function LaminaTool() {
               <Text size={1} muted>
                 Saved: {lastSaved}
               </Text>
+            ) : null}
+            {errorMessage ? (
+              <Card padding={2} radius={2} tone="critical">
+                <Text size={1}>{errorMessage}</Text>
+              </Card>
             ) : null}
           </Flex>
           <Button

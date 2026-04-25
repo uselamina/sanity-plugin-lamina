@@ -1,109 +1,172 @@
 import { useCallback, useState } from 'react';
 import { ResetIcon } from '@sanity/icons';
-import type { DocumentActionComponent, DocumentActionProps } from 'sanity';
-import { useClient } from 'sanity';
+import type {
+  DocumentActionComponent,
+  DocumentActionProps,
+  ObjectSchemaType,
+  SchemaType,
+  ArraySchemaType,
+  SanityDocument,
+} from 'sanity';
+import { useClient, useSchema } from 'sanity';
+
+/** A Lamina-sourced asset found in a document. */
+interface LaminaAssetRef {
+  fieldPath: string;
+  runId: string;
+  runUrl: string;
+}
 
 /**
- * Finds all Lamina-sourced asset references in a document by
- * querying for assets whose `source.name` is "lamina".
+ * Checks whether a schema type is (or derives from) `image` or `file`.
  */
-async function findLaminaAssets(
-  client: ReturnType<typeof useClient>,
-  documentId: string,
-): Promise<Array<{ fieldPath: string; runId: string; runUrl: string }>> {
-  // Query all image/file assets referenced by this document that have Lamina source metadata
-  const result = await client.fetch<
-    Array<{ path: string; source: { name: string; id: string; url: string } }>
-  >(
-    `*[_id == $id][0]{
-      "refs": array::compact([
-        ...(*[_id == ^._id][0]{"_type": _type}),
-      ])
-    }`,
-    { id: documentId },
-  );
+function isImageOrFileType(schemaType: SchemaType): boolean {
+  let current: SchemaType | undefined = schemaType;
+  while (current) {
+    if (current.name === 'image' || current.name === 'file') {
+      return true;
+    }
+    current = current.type;
+  }
+  return false;
+}
 
-  // For now, we use a simpler approach: fetch the document and walk its asset references
-  const doc = await client.fetch('*[_id == $id][0]', { id: documentId });
-  if (!doc) return [];
+/**
+ * Recursively walks a Sanity schema type tree to determine whether it
+ * (or any descendant) can contain image/file fields.
+ */
+function schemaContainsAssetFields(schemaType: SchemaType | undefined): boolean {
+  if (!schemaType) return false;
+  if (isImageOrFileType(schemaType)) return true;
 
-  const assets: Array<{ fieldPath: string; runId: string; runUrl: string }> = [];
+  if ('fields' in schemaType && Array.isArray((schemaType as ObjectSchemaType).fields)) {
+    for (const field of (schemaType as ObjectSchemaType).fields) {
+      if (schemaContainsAssetFields(field.type)) return true;
+    }
+  }
 
-  function walk(obj: unknown, path: string) {
+  if ('of' in schemaType && Array.isArray((schemaType as ArraySchemaType).of)) {
+    for (const member of (schemaType as ArraySchemaType).of) {
+      if (schemaContainsAssetFields(member)) return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Walks a fetched Sanity document and collects every `asset._ref` from
+ * fields whose runtime `_type` is `image` or `file`.
+ */
+function collectAssetRefs(
+  doc: SanityDocument,
+): Array<{ path: string; assetRef: string }> {
+  const refs: Array<{ path: string; assetRef: string }> = [];
+
+  function walk(obj: unknown, path: string): void {
     if (!obj || typeof obj !== 'object') return;
     const record = obj as Record<string, unknown>;
 
-    // Check if this is an image/file field with an asset reference
-    if (record._type === 'image' || record._type === 'file') {
-      // We'll need to look up the asset document to check source metadata
+    if (
+      (record._type === 'image' || record._type === 'file') &&
+      record.asset &&
+      typeof record.asset === 'object'
+    ) {
+      const asset = record.asset as Record<string, unknown>;
+      if (typeof asset._ref === 'string') {
+        refs.push({ path, assetRef: asset._ref });
+      }
       return;
     }
 
     for (const [key, value] of Object.entries(record)) {
       if (key.startsWith('_')) continue;
+
+      const childPath = path ? `${path}.${key}` : key;
       if (Array.isArray(value)) {
-        value.forEach((item, i) => walk(item, `${path}.${key}[${i}]`));
+        value.forEach((item, i) => walk(item, `${childPath}[${i}]`));
       } else if (typeof value === 'object' && value !== null) {
-        walk(value, `${path}.${key}`);
+        walk(value, childPath);
       }
     }
   }
 
   walk(doc, '');
-  return assets;
+  return refs;
+}
+
+/**
+ * Finds all Lamina-sourced asset references in a document.
+ */
+async function findLaminaAssets(
+  client: ReturnType<typeof useClient>,
+  documentId: string,
+): Promise<LaminaAssetRef[]> {
+  const doc = await client.fetch<SanityDocument | null>(
+    '*[_id == $id || _id == $draftId][0]',
+    { id: documentId, draftId: `drafts.${documentId}` },
+  );
+  if (!doc) return [];
+
+  const collected = collectAssetRefs(doc);
+  if (collected.length === 0) return [];
+
+  const assetIds = collected.map((c) => c.assetRef);
+  const assetSources = await client.fetch<
+    Array<{
+      _id: string;
+      source: { name?: string; id?: string; url?: string } | null;
+    }>
+  >(
+    '*[_id in $ids]{ _id, source }',
+    { ids: assetIds },
+  );
+
+  const sourceMap = new Map(
+    assetSources.map((a) => [a._id, a.source]),
+  );
+
+  const results: LaminaAssetRef[] = [];
+  for (const { path, assetRef } of collected) {
+    const source = sourceMap.get(assetRef);
+    if (source?.name === 'lamina' && source.id && source.url) {
+      results.push({
+        fieldPath: path,
+        runId: source.id,
+        runUrl: source.url,
+      });
+    }
+  }
+
+  return results;
 }
 
 export function createRegenerateAction(): DocumentActionComponent {
   const RegenerateAction: DocumentActionComponent = (
     props: DocumentActionProps,
   ) => {
-    const { id: documentId, published } = props;
+    const { id: documentId, type: documentType, published, draft } = props;
     const client = useClient({ apiVersion: '2024-01-01' });
+    const schema = useSchema();
     const [checking, setChecking] = useState(false);
-    const [hasLaminaAssets, setHasLaminaAssets] = useState<boolean | null>(null);
+
+    const schemaType = schema.get(documentType);
+    const canHaveAssets = schemaContainsAssetFields(schemaType);
+    const hasDocument = Boolean(published || draft);
 
     const handleClick = useCallback(async () => {
       setChecking(true);
-
       try {
-        // Query for any assets in this document with lamina source
-        const query = `*[_id == $id][0]{
-          "assetRefs": array::compact([
-            mainImage.asset->.source,
-            image.asset->.source,
-            file.asset->.source,
-            poster.asset->.source,
-            thumbnail.asset->.source,
-            hero.asset->.source,
-            cover.asset->.source,
-            media.asset->.source
-          ])
-        }`;
-
-        const result = await client.fetch<{
-          assetRefs: Array<{ name?: string; id?: string; url?: string } | null>;
-        }>(query, { id: documentId });
-
-        const laminaRefs = (result?.assetRefs || []).filter(
-          (ref) => ref?.name === 'lamina',
-        );
-
-        if (laminaRefs.length > 0) {
-          // Open the first Lamina asset's run URL
-          const firstRef = laminaRefs[0];
-          if (firstRef?.url) {
-            window.open(firstRef.url, '_blank', 'noopener');
-          }
+        const laminaAssets = await findLaminaAssets(client, documentId);
+        if (laminaAssets.length > 0) {
+          window.open(laminaAssets[0].runUrl, '_blank', 'noopener');
         }
-
-        setHasLaminaAssets(laminaRefs.length > 0);
       } finally {
         setChecking(false);
       }
     }, [client, documentId]);
 
-    // Don't show the action if there's no published document
-    if (!published) return null;
+    if (!canHaveAssets || !hasDocument) return null;
 
     return {
       label: checking ? 'Checking...' : 'Edit in Lamina',

@@ -23,7 +23,7 @@ export interface LaminaAssetSourceMeta {
   url: string;
 }
 
-export type GenerationStatus = 'idle' | 'discovering' | 'generating' | 'completed' | 'failed';
+export type GenerationStatus = 'idle' | 'discovering' | 'generating' | 'needs-input' | 'completed' | 'failed';
 
 export interface GenerationState {
   status: GenerationStatus;
