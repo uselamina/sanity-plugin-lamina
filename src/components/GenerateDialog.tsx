@@ -495,10 +495,30 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     }
   }, [brief, modality, assetType, selectedAppId, client]);
 
-  const outputToAsset = useCallback(
-    (output: GeneratedOutput): AssetFromSource => ({
+  // Proxy a CDN URL through transferAsset to avoid CORS issues
+  const resolveAssetUrl = useCallback(
+    async (output: GeneratedOutput): Promise<string> => {
+      try {
+        const mediaType =
+          output.type === 'video' ? 'video' : output.type === 'image' ? 'image' : 'image';
+        const result = await client.publishing.transferAsset({
+          sourceUrl: output.url,
+          mediaType: mediaType as 'image' | 'video' | 'audio',
+          filename: `lamina-${state.runId ?? 'gen'}-${output.id}`,
+        });
+        return result.data.cdnUrl;
+      } catch {
+        // Fall back to direct URL if transferAsset fails
+        return output.url;
+      }
+    },
+    [client, state.runId],
+  );
+
+  const buildAsset = useCallback(
+    (output: GeneratedOutput, resolvedUrl: string): AssetFromSource => ({
       kind: 'url',
-      value: output.url,
+      value: resolvedUrl,
       assetDocumentProps: {
         originalFilename: `lamina-${state.runId ?? 'gen'}-${output.id}.${
           output.mimeType?.split('/')[1] || 'png'
@@ -515,11 +535,19 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     [state.runId, brief],
   );
 
+  const [selecting, setSelecting] = useState(false);
+
   const handleSelectOutput = useCallback(
-    (output: GeneratedOutput) => {
-      onSelect([outputToAsset(output)]);
+    async (output: GeneratedOutput) => {
+      setSelecting(true);
+      try {
+        const url = await resolveAssetUrl(output);
+        onSelect([buildAsset(output, url)]);
+      } finally {
+        setSelecting(false);
+      }
     },
-    [outputToAsset, onSelect],
+    [resolveAssetUrl, buildAsset, onSelect],
   );
 
   const handleToggleOutput = useCallback((outputId: string) => {
@@ -534,11 +562,22 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     });
   }, []);
 
-  const handleUseSelected = useCallback(() => {
+  const handleUseSelected = useCallback(async () => {
     const selected = state.outputs.filter((o) => selectedOutputIds.has(o.id));
     if (selected.length === 0) return;
-    onSelect(selected.map(outputToAsset));
-  }, [state.outputs, selectedOutputIds, outputToAsset, onSelect]);
+    setSelecting(true);
+    try {
+      const resolved = await Promise.all(
+        selected.map(async (o) => {
+          const url = await resolveAssetUrl(o);
+          return buildAsset(o, url);
+        }),
+      );
+      onSelect(resolved);
+    } finally {
+      setSelecting(false);
+    }
+  }, [state.outputs, selectedOutputIds, resolveAssetUrl, buildAsset, onSelect]);
 
   const handleReset = useCallback(() => {
     abortRef.current?.abort();
@@ -848,10 +887,11 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                       ) : (
                         <Inline space={2}>
                           <Button
-                            text="Use this"
+                            text={selecting ? 'Saving...' : 'Use this'}
                             tone="positive"
                             icon={CheckmarkCircleIcon}
                             onClick={() => handleSelectOutput(output)}
+                            disabled={selecting}
                             fontSize={1}
                             padding={2}
                           />
@@ -865,10 +905,11 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
               {/* Multi-select action */}
               {isMultiple && selectedOutputIds.size > 0 ? (
                 <Button
-                  text={`Use ${selectedOutputIds.size} selected`}
+                  text={selecting ? 'Saving...' : `Use ${selectedOutputIds.size} selected`}
                   tone="positive"
                   icon={CheckmarkCircleIcon}
                   onClick={handleUseSelected}
+                  disabled={selecting}
                 />
               ) : null}
 

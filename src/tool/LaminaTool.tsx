@@ -15,7 +15,6 @@ import {
 import { LaunchIcon, ImageIcon, ResetIcon } from '@sanity/icons';
 import { useClient } from 'sanity';
 import { useLamina } from '../lib/LaminaContext.js';
-
 const LAMINA_ORIGIN = 'https://app.uselamina.ai';
 
 interface LaminaMessage {
@@ -204,7 +203,7 @@ function AssetBrowser() {
 }
 
 export function LaminaTool() {
-  const { options } = useLamina();
+  const { client: laminaClient, options } = useLamina();
   const sanityClient = useClient({ apiVersion: '2024-01-01' });
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [saving, setSaving] = useState(false);
@@ -226,17 +225,32 @@ export function LaminaTool() {
         setSaving(true);
         setErrorMessage(null);
         try {
-          const type = msg.mediaType === 'video' ? 'file' : 'image';
+          const assetType = msg.mediaType === 'video' ? 'file' : 'image';
+          const mediaType: 'image' | 'video' = msg.mediaType === 'video' ? 'video' : 'image';
+          const filename = msg.filename || `lamina-${msg.runId || 'asset'}`;
+
+          // Proxy through transferAsset to avoid CORS issues with cdn.uselamina.ai
+          let downloadUrl = msg.url;
+          try {
+            const transferred = await laminaClient.publishing.transferAsset({
+              sourceUrl: msg.url,
+              mediaType,
+              filename,
+            });
+            downloadUrl = transferred.data.cdnUrl;
+          } catch {
+            // Fall back to direct URL if transferAsset isn't available
+          }
 
           let response: Response;
           try {
-            response = await fetch(msg.url);
+            response = await fetch(downloadUrl);
           } catch (fetchErr) {
             const detail =
               fetchErr instanceof TypeError
-                ? 'This is likely a CORS issue on cdn.uselamina.ai. Ask your Lamina admin to allow the Studio origin.'
+                ? 'Failed to download asset. The CDN may not allow cross-origin requests from this Studio.'
                 : 'Network request failed.';
-            throw new Error(`Failed to download asset: ${detail}`);
+            throw new Error(detail);
           }
 
           if (!response.ok) {
@@ -248,8 +262,8 @@ export function LaminaTool() {
           const blob = await response.blob();
 
           try {
-            await sanityClient.assets.upload(type, blob, {
-              filename: msg.filename || `lamina-${msg.runId || 'asset'}`,
+            await sanityClient.assets.upload(assetType, blob, {
+              filename,
               source: {
                 name: 'lamina',
                 id: msg.runId || '',
@@ -261,7 +275,7 @@ export function LaminaTool() {
             throw new Error(`Failed to upload asset to Sanity: ${reason}`);
           }
 
-          setLastSaved(msg.filename || msg.runId || 'asset');
+          setLastSaved(filename);
         } catch (err) {
           const message =
             err instanceof Error ? err.message : 'Failed to save asset.';
@@ -272,7 +286,7 @@ export function LaminaTool() {
         }
       }
     },
-    [baseUrl, sanityClient],
+    [baseUrl, laminaClient, sanityClient],
   );
 
   useEffect(() => {
