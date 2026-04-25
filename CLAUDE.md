@@ -82,7 +82,7 @@ Key types from `@uselamina/sdk`:
 - `ExecutionStatus` — `{ runId, status, outputs[], errorMessage, quality? }`
 - `ExecutionOutput` — `{ id, type, value, mimeType, dimensions?, durationSeconds? }`
 
-## What's implemented (v0.1.0)
+## What's implemented
 
 - [x] Package scaffold with TypeScript, builds cleanly
 - [x] `laminaPlugin()` with `definePlugin` — registers asset source, tool, document action
@@ -90,45 +90,29 @@ Key types from `@uselamina/sdk`:
 - [x] `GenerateDialog` — brief input, modality selector, generate button, polling progress, output preview grid, "Use this" button
 - [x] `LaminaAssetSource` — registered for both `form.image` and `form.file`
 - [x] `LaminaTool` — iframe embed with postMessage listener, save-to-Sanity flow, "Open in new tab" fallback
-- [x] `regenerateAction` — detects Lamina assets, opens run URL
+- [x] `regenerateAction` — schema-aware asset discovery using `useSchema()` + document walk + batch query
+- [x] `GenerateDialog` — needsInput handling with dynamic form fields (text, options, url)
+- [x] `GenerateDialog` — app picker with `apps.list()` and `apps.discover()` support
+- [x] `GenerateDialog` — specific error handling for `LaminaAuthError`, `LaminaRateLimitError`, network failures, 30-min timeout
+- [x] `LaminaTool` — granular error handling for CORS/fetch and Sanity upload failures
 
 ## What needs work
 
-### Critical (must fix before first real use)
+### Critical (must fix before first real use) — tracked in GitHub issues
 
-1. **`/embed` route on Lamina side** — `LaminaTool` loads `{baseUrl}/embed?token=...` which doesn't exist yet. Need to add a chromeless (no sidebar/nav) render of the Lamina editor at this route in the main Lamina app (`cirbuk/react-flow-integration`). The iframe should be able to receive the API token via URL param or postMessage handshake.
+1. **`/embed` route on Lamina side** — [#1](https://github.com/uselamina/sanity-plugin-lamina/issues/1)
+2. **postMessage protocol on Lamina side** — [#2](https://github.com/uselamina/sanity-plugin-lamina/issues/2)
+3. **CORS on `cdn.uselamina.ai`** — [#3](https://github.com/uselamina/sanity-plugin-lamina/issues/3)
 
-2. **postMessage protocol on Lamina side** — The Lamina editor needs to emit `lamina:asset-ready` messages when a user finishes a generation and wants to send it to Sanity. Shape: `{ type: 'lamina:asset-ready', url, runId, mediaType, filename }`. This must be implemented in the Lamina React app.
+### Enhancements — tracked in GitHub issues
 
-3. **CORS on `cdn.uselamina.ai`** — The asset source uses `kind: 'url'` which means Sanity Studio fetches the URL client-side to upload it. The CDN must respond with `Access-Control-Allow-Origin: *` (or at least allow the Studio host).
-
-4. **Document action: generic asset discovery** — `regenerateAction.tsx` currently hardcodes field names (`mainImage`, `image`, `file`, `poster`, etc.) in the GROQ query. This should be replaced with a schema-aware approach that walks the document's schema to find all image/file fields, then resolves their asset references. Use `useSchema()` from Sanity to get the schema at runtime.
-
-### Important improvements
-
-5. **needsInput handling in GenerateDialog** — When `content.create()` returns `needsInput` (the selected app requires parameters the brief didn't cover), the dialog just shows an error message. It should render dynamic input fields based on `needsInput.missing[]` (each has `name`, `type`, `description`, `accept`). The `Parameter` type from `@uselamina/sdk` describes these.
-
-6. **App picker** — Before generating, let users optionally browse/select a specific Lamina app via `client.apps.list()` or `client.apps.discover()`. Show app name, description, capabilities. Pass `appId` to `content.create()`.
-
-7. **Re-generation dialog** — Instead of just opening the run URL in a new tab, the "Edit in Lamina" action should open a dialog that shows the original brief and outputs, lets the user modify the brief, and re-generates in place. Query the original run via `client.runs.get(runId)` to get context.
-
-8. **Multiple output selection** — When `selectionType === 'multiple'`, let users select several outputs at once and return them all via `onSelect()`.
-
-9. **Error states and edge cases** — Add proper error UI for: invalid/expired API key, rate limiting (429), network failures, timeout after 30 minutes of polling. The SDK throws `LaminaAuthError` and `LaminaRateLimitError` which should be caught and shown with specific messages.
-
-10. **Credit balance display** — Before generating, call `client.apps.estimate(appId)` if an app is selected, and show estimated credit cost + current balance. Warn if the balance is insufficient (`affordable: false`).
-
-### Nice to have
-
-11. **OAuth per-user auth** — The `LaminaPluginOptions.oauth` field is defined in types but not implemented. Would need: OAuth redirect flow, token storage (localStorage or Sanity user metadata), token refresh. Lamina has MCP OAuth infra (`mcpOAuthService.ts`) that can be extended.
-
-12. **Asset browser in Studio Tool** — Add a tab/panel in `LaminaTool` that shows previously generated Lamina assets in the Sanity dataset (query for assets where `source.name === 'lamina'`).
-
-13. **Sanity field-level "Edit in Lamina" button** — Register a custom input component (or field action) that shows an "Edit in Lamina" icon button directly on image fields that have Lamina source metadata. More discoverable than the document action.
-
-14. **Webhook-based completion** — Instead of polling `runs.wait()`, support webhook delivery for faster notification. Would need the Studio or a backend to expose a webhook endpoint.
-
-15. **`@sanity/plugin-kit` migration** — For publishing to npm and Sanity Exchange, scaffold with `npx @sanity/plugin-kit init` for proper bundling (CJS + ESM), semantic-release, and testing setup.
+4. **Credit balance display** — [#4](https://github.com/uselamina/sanity-plugin-lamina/issues/4)
+5. **OAuth per-user auth** — [#5](https://github.com/uselamina/sanity-plugin-lamina/issues/5)
+6. **Asset browser in Studio Tool** — [#6](https://github.com/uselamina/sanity-plugin-lamina/issues/6)
+7. **Field-level "Edit in Lamina" button** — [#7](https://github.com/uselamina/sanity-plugin-lamina/issues/7)
+8. **Webhook-based completion** — [#8](https://github.com/uselamina/sanity-plugin-lamina/issues/8)
+9. **`@sanity/plugin-kit` migration** — [#9](https://github.com/uselamina/sanity-plugin-lamina/issues/9)
+10. **Multiple output selection** — [#10](https://github.com/uselamina/sanity-plugin-lamina/issues/10)
 
 ## Build & test
 
