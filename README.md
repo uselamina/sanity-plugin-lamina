@@ -1,4 +1,4 @@
-# sanity-plugin-lamina
+# Lamina Video & Image Creator for Sanity
 
 Sanity Studio plugin that lets content editors generate and manage media assets with [Lamina](https://uselamina.ai) directly inside Sanity Studio.
 
