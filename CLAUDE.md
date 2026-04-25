@@ -85,34 +85,28 @@ Key types from `@uselamina/sdk`:
 ## What's implemented
 
 - [x] Package scaffold with TypeScript, builds cleanly
-- [x] `laminaPlugin()` with `definePlugin` — registers asset source, tool, document action
-- [x] `LaminaProvider` / `useLamina()` React context for SDK client
-- [x] `GenerateDialog` — brief input, modality selector, generate button, polling progress, output preview grid, "Use this" button
+- [x] `laminaPlugin()` with `definePlugin` — registers all surfaces
+- [x] `LaminaProvider` / `useLamina()` React context with OAuth fallback
+- [x] `GenerateDialog` — brief, modality, app picker, generate, poll, preview, select
+- [x] `GenerateDialog` — needsInput handling with dynamic form fields
+- [x] `GenerateDialog` — app picker with `apps.list()` and `apps.discover()`
+- [x] `GenerateDialog` — credit balance display with cost estimates
+- [x] `GenerateDialog` — multi-select support when `selectionType === 'multiple'`
+- [x] `GenerateDialog` — error handling for auth, rate limit, network, timeout
 - [x] `LaminaAssetSource` — registered for both `form.image` and `form.file`
-- [x] `LaminaTool` — iframe embed with postMessage listener, save-to-Sanity flow, "Open in new tab" fallback
-- [x] `regenerateAction` — schema-aware asset discovery using `useSchema()` + document walk + batch query
-- [x] `GenerateDialog` — needsInput handling with dynamic form fields (text, options, url)
-- [x] `GenerateDialog` — app picker with `apps.list()` and `apps.discover()` support
-- [x] `GenerateDialog` — specific error handling for `LaminaAuthError`, `LaminaRateLimitError`, network failures, 30-min timeout
-- [x] `LaminaTool` — granular error handling for CORS/fetch and Sanity upload failures
+- [x] `LaminaTool` — Editor tab (iframe embed + postMessage bridge) + Assets tab (asset browser)
+- [x] `LaminaTool` — granular error handling for CORS/fetch and upload failures
+- [x] `regenerateAction` — schema-aware asset discovery + batch source query
+- [x] `LaminaImageInput` — field-level "Edit in Lamina" button on image/file fields
+- [x] OAuth per-user auth — token storage, exchange, refresh, login UI
+- [x] Webhook URL support via `webhookUrl` plugin option
+- [x] README.md and LICENSE for npm/Sanity Exchange publishing
 
-## What needs work
+## Lamina-side dependencies (in progress in cirbuk/react-flow-integration)
 
-### Critical (must fix before first real use) — tracked in GitHub issues
-
-1. **`/embed` route on Lamina side** — [#1](https://github.com/uselamina/sanity-plugin-lamina/issues/1)
-2. **postMessage protocol on Lamina side** — [#2](https://github.com/uselamina/sanity-plugin-lamina/issues/2)
-3. **CORS on `cdn.uselamina.ai`** — [#3](https://github.com/uselamina/sanity-plugin-lamina/issues/3)
-
-### Enhancements — tracked in GitHub issues
-
-4. **Credit balance display** — [#4](https://github.com/uselamina/sanity-plugin-lamina/issues/4)
-5. **OAuth per-user auth** — [#5](https://github.com/uselamina/sanity-plugin-lamina/issues/5)
-6. **Asset browser in Studio Tool** — [#6](https://github.com/uselamina/sanity-plugin-lamina/issues/6)
-7. **Field-level "Edit in Lamina" button** — [#7](https://github.com/uselamina/sanity-plugin-lamina/issues/7)
-8. **Webhook-based completion** — [#8](https://github.com/uselamina/sanity-plugin-lamina/issues/8)
-9. **`@sanity/plugin-kit` migration** — [#9](https://github.com/uselamina/sanity-plugin-lamina/issues/9)
-10. **Multiple output selection** — [#10](https://github.com/uselamina/sanity-plugin-lamina/issues/10)
+1. `/embed` route for Studio Tool iframe
+2. `postMessage` protocol (`lamina:asset-ready`, `lamina:editor-close`)
+3. CORS on `cdn.uselamina.ai` for client-side asset fetch
 
 ## Build & test
 
