@@ -1,0 +1,62 @@
+{
+  "name": "sanity-plugin-lamina",
+  "version": "0.1.0",
+  "description": "Sanity Studio plugin for generating media assets with Lamina",
+  "keywords": [
+    "sanity",
+    "sanity-plugin",
+    "lamina",
+    "ai",
+    "media-generation",
+    "image-generation",
+    "video-generation",
+    "asset-source"
+  ],
+  "homepage": "https://docs.uselamina.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/uselamina/sanity-plugin-lamina.git"
+  },
+  "license": "MIT",
+  "author": "Lamina <hello@uselamina.ai>",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@uselamina/sdk": "^0.1.0"
+  },
+  "devDependencies": {
+    "@sanity/icons": "^3.5.0",
+    "@sanity/ui": "^2.10.0",
+    "react": "^19.0.0",
+    "sanity": "^3.72.0",
+    "styled-components": "^6.1.0",
+    "typescript": "^5.7.0"
+  },
+  "peerDependencies": {
+    "@sanity/icons": "^3.0.0",
+    "@sanity/ui": "^2.0.0",
+    "react": "^18.0.0 || ^19.0.0",
+    "sanity": "^3.0.0",
+    "styled-components": "^6.0.0"
+  }
+}
