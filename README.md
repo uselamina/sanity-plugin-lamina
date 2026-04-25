@@ -4,19 +4,15 @@ Sanity Studio plugin that lets content editors generate and manage media assets 
 
 ## What you can generate
 
-<p align="center">
-  <img src="https://cdn.sanity.io/images/nxxnxyyr/production/20a6d32531d3b2a5d9cbdd20e5dcd50fe49964d5-1024x1024.jpg?auto=format&fit=max&q=75&w=400" width="200" alt="Product Shoots" />
-  <img src="https://cdn.sanity.io/images/nxxnxyyr/production/81940a40ac0879d7d10322b523ce5a2b30eba305-800x1000.jpg?auto=format&fit=max&q=75&w=400" width="200" alt="Ad Variants" />
-  <img src="https://cdn.sanity.io/images/nxxnxyyr/production/65eea9de797a81786ff7c6fab8b08f08a7865c61-800x1000.jpg?auto=format&fit=max&q=75&w=400" width="200" alt="Virtual Try-On" />
-  <img src="https://cdn.sanity.io/images/nxxnxyyr/production/38d98d8dca4b633d8135de9c8ee64e2eccfa348d-1080x1920.jpg?auto=format&fit=max&q=75&w=200" width="112" alt="Instagram Reels" />
-</p>
+![Product Shoots](https://cdn.sanity.io/images/nxxnxyyr/production/20a6d32531d3b2a5d9cbdd20e5dcd50fe49964d5-1024x1024.jpg?auto=format&fit=max&q=75&w=400)
+![Ad Variants](https://cdn.sanity.io/images/nxxnxyyr/production/81940a40ac0879d7d10322b523ce5a2b30eba305-800x1000.jpg?auto=format&fit=max&q=75&w=400)
+![Virtual Try-On](https://cdn.sanity.io/images/nxxnxyyr/production/65eea9de797a81786ff7c6fab8b08f08a7865c61-800x1000.jpg?auto=format&fit=max&q=75&w=400)
+![Instagram Reels](https://cdn.sanity.io/images/nxxnxyyr/production/38d98d8dca4b633d8135de9c8ee64e2eccfa348d-1080x1920.jpg?auto=format&fit=max&q=75&w=200)
 
-<p align="center">
-  <img src="https://cdn.sanity.io/images/nxxnxyyr/production/942f807749bcd6ecbdbfef611c30b78da01dfc1a-1920x1080.jpg?auto=format&fit=max&q=75&w=400" width="320" alt="Campaign Banners" />
-  <img src="https://cdn.sanity.io/images/nxxnxyyr/production/0a68f5d0169cb18a0dd299afeb635e331adc60c9-1920x1080.jpg?auto=format&fit=max&q=75&w=400" width="320" alt="Brand Films" />
-</p>
+![Campaign Banners](https://cdn.sanity.io/images/nxxnxyyr/production/942f807749bcd6ecbdbfef611c30b78da01dfc1a-1920x1080.jpg?auto=format&fit=max&q=75&w=400)
+![Brand Films](https://cdn.sanity.io/images/nxxnxyyr/production/0a68f5d0169cb18a0dd299afeb635e331adc60c9-1920x1080.jpg?auto=format&fit=max&q=75&w=400)
 
-<p align="center"><em>Product shoots, ad variants, virtual try-ons, reels, campaign banners, brand films -- all generated from a brief.</em></p>
+*Product shoots, ad variants, virtual try-ons, reels, campaign banners, brand films -- all generated from a brief.*
 
 ## Features
 
