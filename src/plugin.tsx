@@ -1,6 +1,7 @@
-import { definePlugin, type Tool } from 'sanity';
+import { definePlugin, type InputProps, type Tool } from 'sanity';
 import { RocketIcon } from '@sanity/icons';
 import { laminaAssetSource } from './components/LaminaAssetSource.js';
+import { LaminaImageInput } from './components/LaminaFieldAction.js';
 import { LaminaProvider } from './lib/LaminaContext.js';
 import { LaminaTool } from './tool/LaminaTool.js';
 import { createRegenerateAction } from './actions/regenerateAction.js';
@@ -74,6 +75,21 @@ export const laminaPlugin = definePlugin<LaminaPluginOptions>((options) => {
             ),
           },
         ],
+      },
+      components: {
+        input: (props: InputProps) => {
+          const typeName = props.schemaType?.name;
+          const baseTypeName = props.schemaType?.type?.name;
+          if (
+            typeName === 'image' ||
+            typeName === 'file' ||
+            baseTypeName === 'image' ||
+            baseTypeName === 'file'
+          ) {
+            return <LaminaImageInput {...(props as any)} />;
+          }
+          return props.renderDefault(props);
+        },
       },
     },
 

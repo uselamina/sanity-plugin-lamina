@@ -1,13 +1,38 @@
+export interface LaminaOAuthConfig {
+  /** OAuth client ID for Lamina. */
+  clientId: string;
+  /**
+   * OAuth redirect URI. Defaults to `{window.location.origin}/lamina/callback`.
+   */
+  redirectUri?: string;
+  /**
+   * Storage key prefix for persisting tokens. Defaults to `'lamina_oauth'`.
+   */
+  storageKey?: string;
+}
+
 export interface LaminaPluginOptions {
-  /** Lamina API key (team-level auth). */
+  /** Lamina API key (team-level auth). Falls back to per-user OAuth if not set. */
   apiKey?: string;
   /** Lamina API base URL. Defaults to https://app.uselamina.ai */
   baseUrl?: string;
+  /**
+   * OAuth configuration for per-user authentication.
+   * When set, users without a team-level apiKey can authenticate individually.
+   */
+  oauth?: LaminaOAuthConfig;
   /**
    * Whether to register the Lamina Editor as a Studio tool in the top nav.
    * @default true
    */
   enableTool?: boolean;
+  /**
+   * Webhook URL for receiving generation completion events.
+   * When set, the plugin will pass this URL to the Lamina API
+   * and listen for completion via SSE/polling instead of repeated GET requests.
+   * Falls back to standard polling if not set.
+   */
+  webhookUrl?: string;
   /**
    * Whether to register the "Regenerate Media" document action
    * for documents containing Lamina-sourced assets.
