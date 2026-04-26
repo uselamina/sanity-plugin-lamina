@@ -1185,21 +1185,16 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     [feedbackState, client, finishAndClose],
   );
 
-  // Start the auto-close timer whenever feedback UI appears
+  // Clean up any lingering timer on unmount (no auto-dismiss — user must
+  // click a feedback button or "Skip" to proceed).
   useEffect(() => {
-    if (feedbackState && !feedbackState.submitted) {
-      feedbackTimerRef.current = setTimeout(() => {
-        finishAndClose();
-      }, 5000);
-      return () => {
-        if (feedbackTimerRef.current) {
-          clearTimeout(feedbackTimerRef.current);
-          feedbackTimerRef.current = null;
-        }
-      };
-    }
-    return undefined;
-  }, [feedbackState, finishAndClose]);
+    return () => {
+      if (feedbackTimerRef.current) {
+        clearTimeout(feedbackTimerRef.current);
+        feedbackTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const handleSelectOutput = useCallback(
     async (output: GeneratedOutput) => {
@@ -1760,7 +1755,21 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           {/* Error */}
           {state.status === 'failed' && state.error ? (
             <Card padding={3} radius={2} tone="critical">
-              <Text size={1}>{state.error}</Text>
+              <Stack space={3}>
+                <Text size={1}>{state.error}</Text>
+                <Inline space={2}>
+                  <Button
+                    text="Try again"
+                    icon={ResetIcon}
+                    tone="default"
+                    mode="ghost"
+                    onClick={handleGenerate}
+                    disabled={!brief.trim()}
+                    fontSize={1}
+                    padding={2}
+                  />
+                </Inline>
+              </Stack>
             </Card>
           ) : null}
 
@@ -1816,6 +1825,16 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                       </Text>
                     ) : null}
                   </Stack>
+                  <Box style={{ marginLeft: 'auto' }}>
+                    <Button
+                      text="Cancel"
+                      mode="ghost"
+                      tone="default"
+                      fontSize={1}
+                      padding={2}
+                      onClick={handleReset}
+                    />
+                  </Box>
                 </Flex>
                 {state.progress !== null ? (
                   <Box
