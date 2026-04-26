@@ -79,6 +79,8 @@ export interface LaminaAsset {
   mimeType: string | null;
   size: number | null;
   _createdAt: string;
+  /** The original brief used to generate this asset. */
+  description: string | null;
   source: {
     name: string;
     id: string;

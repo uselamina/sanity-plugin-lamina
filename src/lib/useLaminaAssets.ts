@@ -71,6 +71,7 @@ export function useLaminaAssets(options: UseLaminaAssetsOptions): UseLaminaAsset
           mimeType,
           size,
           _createdAt,
+          description,
           source
         }`,
       );

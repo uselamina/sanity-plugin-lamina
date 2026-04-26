@@ -138,6 +138,11 @@ export function AssetPickerGrid(props: AssetPickerGridProps) {
                 <Text size={0} textOverflow="ellipsis">
                   {asset.originalFilename || asset._id}
                 </Text>
+                {asset.description ? (
+                  <Text size={0} muted textOverflow="ellipsis" style={{ maxHeight: 32, overflow: 'hidden' }}>
+                    {asset.description}
+                  </Text>
+                ) : null}
                 <Flex align="center" justify="space-between">
                   <Text size={0} muted>
                     {formatFileSize(asset.size)}

@@ -5,6 +5,7 @@ import { LaminaImageInput } from './components/LaminaFieldAction.js';
 import { LaminaProvider } from './lib/LaminaContext.js';
 import { LaminaTool } from './tool/LaminaTool.js';
 import { createRegenerateAction } from './actions/regenerateAction.js';
+import { createGenerateAllAction } from './actions/generateAllAction.js';
 import type { LaminaPluginOptions } from './types.js';
 
 /**
@@ -95,7 +96,7 @@ export const laminaPlugin = definePlugin<LaminaPluginOptions>((options) => {
 
     document: enableDocumentAction
       ? {
-          actions: (prev) => [...prev, createRegenerateAction()],
+          actions: (prev) => [...prev, createRegenerateAction(), createGenerateAllAction()],
         }
       : undefined,
   };
