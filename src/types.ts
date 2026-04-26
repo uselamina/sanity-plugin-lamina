@@ -48,6 +48,24 @@ export interface LaminaAssetSourceMeta {
   url: string;
 }
 
+/** A Lamina-sourced asset stored in Sanity. */
+export interface LaminaAsset {
+  _id: string;
+  _type: string;
+  url: string;
+  originalFilename: string | null;
+  mimeType: string | null;
+  size: number | null;
+  _createdAt: string;
+  source: {
+    name: string;
+    id: string;
+    url?: string;
+  } | null;
+}
+
+export type AssetTypeFilter = 'all' | 'images' | 'videos';
+
 export type GenerationStatus = 'idle' | 'discovering' | 'generating' | 'needs-input' | 'completed' | 'failed';
 
 export interface GenerationState {
