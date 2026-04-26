@@ -698,9 +698,18 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         return;
       }
 
+      // Silent enrichment — same document context as handleGenerate
+      const metadata: Record<string, string> = {
+        ...(documentType ? { documentType } : {}),
+        ...(documentTitle ? { documentTitle } : {}),
+        ...(fieldName ? { fieldName } : {}),
+        ...(fieldDescription ? { fieldPurpose: fieldDescription } : {}),
+      };
+
       const runResult = await client.runs.run(appId, {
         inputs: collectedInputs,
         ...(options.webhookUrl ? { webhook: options.webhookUrl } : {}),
+        ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
       });
       if (abort.signal.aborted) return;
 
@@ -756,7 +765,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         progress: null,
       }));
     }
-  }, [needsInputCtx, selectedAppId, collectedInputs, options.webhookUrl, client]);
+  }, [needsInputCtx, selectedAppId, collectedInputs, options.webhookUrl, client, documentType, documentTitle, fieldName, fieldDescription]);
 
   // -- Main generate handler --
 
@@ -781,6 +790,14 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       const resolvedModality =
         modality || (assetType === 'file' ? 'video' : 'image');
 
+      // Silent enrichment — context from the document, not visible in UI
+      const metadata: Record<string, string> = {
+        ...(documentType ? { documentType } : {}),
+        ...(documentTitle ? { documentTitle } : {}),
+        ...(fieldName ? { fieldName } : {}),
+        ...(fieldDescription ? { fieldPurpose: fieldDescription } : {}),
+      };
+
       const createParams: LaminaCreateParams = {
         brief: brief.trim(),
         modality: resolvedModality,
@@ -788,6 +805,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         ...(selectedBrandId ? { brandProfileId: selectedBrandId } : {}),
         ...(selectedCampaignId ? { campaignId: selectedCampaignId } : {}),
         ...(options.webhookUrl ? { webhookUrl: options.webhookUrl } : {}),
+        ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
       };
 
       // Batch mode: run multiple content.create() calls in parallel for variants
@@ -936,7 +954,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         progress: null,
       }));
     }
-  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, documentType, fieldName, client]);
+  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, client, documentType, documentTitle, fieldName, fieldDescription]);
 
   // Proxy a CDN URL through transferAsset to avoid CORS issues
   const resolveAssetUrl = useCallback(
