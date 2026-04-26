@@ -24,6 +24,7 @@ import {
   SearchIcon,
 } from '@sanity/icons';
 import type { AssetFromSource, AssetSourceComponentProps } from 'sanity';
+import { useFormValue } from 'sanity';
 import type {
   AppSummary as SdkAppSummary,
   CostEstimate,
@@ -178,6 +179,67 @@ function ParameterField({
   }
 }
 
+// -- Document context for brief pre-filling --
+
+interface DocumentContext {
+  documentType?: string;
+  documentTitle?: string;
+  fieldName?: string;
+  fieldDescription?: string;
+}
+
+const FIELD_LABELS: Record<string, string> = {
+  heroImage: 'hero image',
+  mainImage: 'main image',
+  thumbnail: 'thumbnail',
+  ogImage: 'social preview image',
+  coverImage: 'cover image',
+  poster: 'poster',
+  avatar: 'avatar',
+  logo: 'logo',
+  icon: 'icon',
+  banner: 'banner',
+  background: 'background image',
+};
+
+const TYPE_LABELS: Record<string, string> = {
+  product: 'product',
+  post: 'blog post',
+  blogPost: 'blog post',
+  article: 'article',
+  page: 'page',
+  landingPage: 'landing page',
+  category: 'category',
+  author: 'author',
+  event: 'event',
+  project: 'project',
+};
+
+function buildSuggestedBrief(ctx: DocumentContext): string {
+  const parts: string[] = [];
+
+  const fieldLabel = ctx.fieldName ? FIELD_LABELS[ctx.fieldName] || ctx.fieldName.replace(/([A-Z])/g, ' $1').toLowerCase().trim() : null;
+  const typeLabel = ctx.documentType ? TYPE_LABELS[ctx.documentType] || ctx.documentType.replace(/([A-Z])/g, ' $1').toLowerCase().trim() : null;
+
+  if (fieldLabel) {
+    parts.push(fieldLabel.charAt(0).toUpperCase() + fieldLabel.slice(1));
+  }
+
+  if (typeLabel && ctx.documentTitle) {
+    parts.push(`for ${typeLabel}: ${ctx.documentTitle}`);
+  } else if (ctx.documentTitle) {
+    parts.push(`for ${ctx.documentTitle}`);
+  } else if (typeLabel) {
+    parts.push(`for ${typeLabel}`);
+  }
+
+  if (ctx.fieldDescription) {
+    parts.push(`(${ctx.fieldDescription})`);
+  }
+
+  return parts.join(' ');
+}
+
 export function GenerateDialog(props: AssetSourceComponentProps) {
   const {
     assetType: rawAssetType,
@@ -188,8 +250,37 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
 
   const assetType = rawAssetType === 'image' ? 'image' : 'file';
   const { client, options } = useLamina();
+
+  // -- Document context via useFormValue --
+  const documentTitle = useFormValue(['title']) as string | undefined
+    || useFormValue(['name']) as string | undefined;
+  const documentType = useFormValue(['_type']) as string | undefined;
+
+  // Derive field name from the parent path if available
+  const parentSchemaType = (props as unknown as Record<string, unknown>).schemaType as
+    | { name?: string; description?: string; parent?: { name?: string } }
+    | undefined;
+  const fieldName = parentSchemaType?.name;
+  const fieldDescription = parentSchemaType?.description ?? undefined;
+
+  const suggestedBrief = buildSuggestedBrief({
+    documentType,
+    documentTitle: documentTitle ?? undefined,
+    fieldName,
+    fieldDescription,
+  });
+
   const [brief, setBrief] = useState('');
+  const [briefPreFilled, setBriefPreFilled] = useState(false);
   const [modality, setModality] = useState('');
+
+  // Pre-fill brief on first render if we have context
+  useEffect(() => {
+    if (!briefPreFilled && suggestedBrief && !brief) {
+      setBrief(suggestedBrief);
+      setBriefPreFilled(true);
+    }
+  }, [suggestedBrief, briefPreFilled, brief]);
   const [state, setState] = useState<GenerationState>({
     status: 'idle',
     runId: null,
@@ -721,11 +812,19 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
             <Label size={1}>Describe what you need</Label>
             <TextArea
               value={brief}
-              onChange={(e) => setBrief(e.currentTarget.value)}
+              onChange={(e) => {
+                setBrief(e.currentTarget.value);
+                if (briefPreFilled) setBriefPreFilled(false);
+              }}
               placeholder="Product photo of white sneakers on marble surface, lifestyle aesthetic"
               rows={3}
               disabled={state.status === 'generating'}
             />
+            {briefPreFilled && suggestedBrief ? (
+              <Text size={0} muted>
+                Suggested from document context
+              </Text>
+            ) : null}
           </Stack>
 
           {/* Modality selector */}
