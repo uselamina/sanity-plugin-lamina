@@ -1,6 +1,6 @@
 {
   "name": "sanity-plugin-lamina",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Sanity Studio plugin for generating media assets with Lamina",
   "keywords": [
     "sanity",
