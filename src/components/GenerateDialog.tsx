@@ -32,7 +32,7 @@ import type { AssetFromSource, AssetSourceComponentProps } from 'sanity';
 import { useFormValue } from 'sanity';
 import { useLaminaAssets } from '../lib/useLaminaAssets.js';
 import { AssetPickerGrid } from './AssetPickerGrid.js';
-import type { AssetTypeFilter, LaminaAsset } from '../types.js';
+import type { AssetTypeFilter, LaminaAsset, LaminaPreset } from '../types.js';
 import type {
   AppSummary as SdkAppSummary,
   CostEstimate,
@@ -54,6 +54,35 @@ const MODALITIES = [
   { value: 'image', label: 'Image' },
   { value: 'video', label: 'Video' },
 ] as const;
+
+/** Built-in presets for common field names. Custom presets override these. */
+const DEFAULT_PRESETS: Record<string, LaminaPreset> = {
+  ogImage: { aspectRatio: '16:9', modality: 'image' },
+  socialImage: { aspectRatio: '16:9', modality: 'image' },
+  storyImage: { aspectRatio: '9:16', modality: 'image' },
+  thumbnail: { aspectRatio: '1:1', modality: 'image' },
+  avatar: { aspectRatio: '1:1', modality: 'image' },
+};
+
+/**
+ * Resolve a preset for the current field.
+ * Custom presets from plugin config take precedence over built-in defaults.
+ * Returns `[presetName, preset]` or `null` if no match.
+ */
+function resolvePreset(
+  fieldName: string | undefined,
+  customPresets: Record<string, LaminaPreset> | undefined,
+): [string, LaminaPreset] | null {
+  if (!fieldName) return null;
+  // Custom presets override defaults
+  if (customPresets?.[fieldName]) {
+    return [fieldName, customPresets[fieldName]];
+  }
+  if (DEFAULT_PRESETS[fieldName]) {
+    return [fieldName, DEFAULT_PRESETS[fieldName]];
+  }
+  return null;
+}
 
 /** 30 minutes in milliseconds. */
 const GENERATION_TIMEOUT_MS = 30 * 60 * 1000;
@@ -484,10 +513,15 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const suggestions = getSuggestions(documentType, assetType);
   const recentBriefs = getRecentBriefs(documentType, fieldName);
 
+  // -- Preset resolution --
+  const presetMatch = resolvePreset(fieldName, options.presets);
+  const activePresetName = presetMatch?.[0] ?? null;
+  const activePreset = presetMatch?.[1] ?? null;
+
   const [dialogTab, setDialogTab] = useState<'generate' | 'library'>('generate');
   const [brief, setBrief] = useState('');
   const [briefPreFilled, setBriefPreFilled] = useState(false);
-  const [modality, setModality] = useState('');
+  const [modality, setModality] = useState(activePreset?.modality ?? '');
 
   // -- Aspect ratio auto-detection --
   const detectedRatio = detectAspectRatio(fieldName);
@@ -543,6 +577,13 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   // Batch generation state
   const [batchMode, setBatchMode] = useState(false);
   const [batchCount, setBatchCount] = useState(2);
+
+  // Auto-set app from preset on mount
+  useEffect(() => {
+    if (activePreset?.appId && !selectedAppId) {
+      setSelectedAppId(activePreset.appId);
+    }
+  }, [activePreset?.appId, selectedAppId]);
 
   // Library picker state
   const [libraryFilter, setLibraryFilter] = useState<AssetTypeFilter>(
@@ -813,6 +854,8 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       const createParams: LaminaCreateParams & { aspectRatio?: string; metadata?: Record<string, string> } = {
         brief: brief.trim(),
         modality: resolvedModality,
+        ...(activePreset?.aspectRatio ? { aspectRatio: activePreset.aspectRatio } : {}),
+        ...(activePreset?.platform ? { platform: activePreset.platform } : {}),
         ...(selectedAppId ? { appId: selectedAppId } : {}),
         ...(selectedBrandId ? { brandProfileId: selectedBrandId } : {}),
         ...(selectedCampaignId ? { campaignId: selectedCampaignId } : {}),
@@ -967,7 +1010,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         progress: null,
       }));
     }
-  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, effectiveAspectRatio, client, documentType, documentTitle, fieldName, fieldDescription]);
+  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, effectiveAspectRatio, activePreset, client, documentType, documentTitle, fieldName, fieldDescription]);
 
   // Proxy a CDN URL through transferAsset to avoid CORS issues
   const resolveAssetUrl = useCallback(
@@ -1306,6 +1349,16 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
               ))}
             </Select>
           </Stack>
+
+          {/* Active preset indicator */}
+          {activePresetName ? (
+            <Card padding={2} radius={2} tone="positive" border>
+              <Text size={1} muted>
+                Preset: <strong>{activePresetName}</strong>
+                {activePreset?.aspectRatio ? ` (${activePreset.aspectRatio})` : ''}
+              </Text>
+            </Card>
+          ) : null}
 
           {/* Aspect ratio */}
           <Stack space={2}>
