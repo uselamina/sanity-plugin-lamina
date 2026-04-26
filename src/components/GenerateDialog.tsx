@@ -25,6 +25,7 @@ import {
   CloseIcon,
   ResetIcon,
   SearchIcon,
+  UploadIcon,
 } from '@sanity/icons';
 import type { AssetFromSource, AssetSourceComponentProps } from 'sanity';
 import { useFormValue } from 'sanity';
@@ -187,16 +188,164 @@ function describeError(err: unknown): string {
   return 'An unexpected error occurred.';
 }
 
-function ParameterField({
+function isMediaParam(param: MissingInput): boolean {
+  return (
+    param.type === 'url' &&
+    Array.isArray(param.accept) &&
+    param.accept.some((a) => a === 'image' || a === 'video')
+  );
+}
+
+function MediaInputField({
   param,
   value,
   onChange,
+  laminaClient,
 }: {
   param: MissingInput;
   value: unknown;
   onChange: (name: string, value: unknown) => void;
+  laminaClient: ReturnType<typeof useLamina>['client'];
 }) {
   const label = param.description || param.name;
+  const [uploading, setUploading] = useState(false);
+  const [preview, setPreview] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const handleFile = useCallback(
+    async (file: File) => {
+      setUploading(true);
+      try {
+        // Show local preview immediately
+        setPreview(URL.createObjectURL(file));
+        // Upload via transferAsset to get a CDN URL
+        const mediaType = file.type.startsWith('video/') ? 'video' : 'image';
+        const result = await laminaClient.publishing.transferAsset({
+          sourceUrl: URL.createObjectURL(file),
+          mediaType: mediaType as 'image' | 'video',
+          filename: file.name,
+        });
+        onChange(param.name, result.data.cdnUrl);
+      } catch {
+        // Fall back: create a blob URL (won't work for server-side, but shows intent)
+        onChange(param.name, URL.createObjectURL(file));
+      } finally {
+        setUploading(false);
+      }
+    },
+    [laminaClient, param.name, onChange],
+  );
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      const file = e.dataTransfer.files[0];
+      if (file) handleFile(file);
+    },
+    [handleFile],
+  );
+
+  const handleFileSelect = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file) handleFile(file);
+    },
+    [handleFile],
+  );
+
+  const currentUrl = typeof value === 'string' ? value : null;
+
+  return (
+    <Stack space={2}>
+      <Label size={1}>{label}</Label>
+      {currentUrl || preview ? (
+        <Card padding={2} radius={2} border>
+          <Flex align="center" gap={3}>
+            <img
+              src={preview || currentUrl!}
+              alt=""
+              style={{ width: 60, height: 60, objectFit: 'cover', borderRadius: 4 }}
+            />
+            <Text size={1} muted textOverflow="ellipsis" style={{ flex: 1 }}>
+              {uploading ? 'Uploading...' : 'Image attached'}
+            </Text>
+            <Button
+              text="Change"
+              mode="ghost"
+              fontSize={0}
+              padding={1}
+              onClick={() => fileRef.current?.click()}
+            />
+          </Flex>
+        </Card>
+      ) : (
+        <Card
+          padding={4}
+          radius={2}
+          border
+          tone="transparent"
+          style={{ textAlign: 'center', cursor: 'pointer' }}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={handleDrop}
+          onClick={() => fileRef.current?.click()}
+        >
+          <Stack space={2}>
+            <Flex justify="center">
+              {uploading ? <Spinner /> : <UploadIcon />}
+            </Flex>
+            <Text size={1} muted>
+              {uploading ? 'Uploading...' : 'Drop file here or click to upload'}
+            </Text>
+            {param.accept ? (
+              <Text size={0} muted>
+                Accepts: {param.accept.join(', ')}
+              </Text>
+            ) : null}
+          </Stack>
+        </Card>
+      )}
+      <input
+        ref={fileRef}
+        type="file"
+        accept={param.accept?.map((a) => `${a}/*`).join(',') ?? 'image/*'}
+        style={{ display: 'none' }}
+        onChange={handleFileSelect}
+      />
+      {/* Fallback URL input */}
+      <TextInput
+        value={currentUrl ?? ''}
+        onChange={(e) => onChange(param.name, e.currentTarget.value)}
+        placeholder="Or paste a URL"
+        fontSize={0}
+      />
+    </Stack>
+  );
+}
+
+function ParameterField({
+  param,
+  value,
+  onChange,
+  laminaClient,
+}: {
+  param: MissingInput;
+  value: unknown;
+  onChange: (name: string, value: unknown) => void;
+  laminaClient?: ReturnType<typeof useLamina>['client'];
+}) {
+  const label = param.description || param.name;
+
+  // Upgrade URL params with media accepts to the rich media input
+  if (isMediaParam(param) && laminaClient) {
+    return (
+      <MediaInputField
+        param={param}
+        value={value}
+        onChange={onChange}
+        laminaClient={laminaClient}
+      />
+    );
+  }
 
   switch (param.type) {
     case 'options':
@@ -1247,6 +1396,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                     param={param}
                     value={collectedInputs[param.name]}
                     onChange={handleInputChange}
+                    laminaClient={client}
                   />
                 ))}
                 <Inline space={2}>
