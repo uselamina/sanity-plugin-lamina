@@ -36,12 +36,34 @@ import type { AssetTypeFilter, LaminaAsset, LaminaPreset } from '../types.js';
 import type {
   AppSummary as SdkAppSummary,
   CostEstimate,
+  ContentBriefParams,
+  ContentConcept,
   ExecutionOutput,
   ExecutionStatus,
   LaminaCreateParams,
   MissingInput,
 } from '@uselamina/sdk';
 import { LaminaAuthError, LaminaRateLimitError } from '@uselamina/sdk';
+
+// --- Extensions for new API fields from Lamina PR #821 ---
+// These augment the SDK types until the SDK is updated.
+
+/** ExecutionStatus extended with granular progress from the API. */
+interface ExecutionStatusWithProgress extends ExecutionStatus {
+  progress?: { percentComplete?: number };
+}
+
+/** CostEstimate extended with credit management URL. */
+interface CostEstimateWithManageUrl extends CostEstimate {
+  credits?: { manageUrl?: string };
+}
+
+/** AppSummary extended with richer metadata. */
+interface AppSummaryEnriched extends SdkAppSummary {
+  icon?: string | null;
+  modality?: string | null;
+  inputSummary?: string | null;
+}
 import { useLamina } from '../lib/LaminaContext.js';
 import { getRoutedAppId, saveRoutedAppId } from '../lib/appRouting.js';
 import { getRecentBriefs, saveRecentBrief } from '../lib/recentBriefs.js';
@@ -159,6 +181,9 @@ interface AppEntry {
   name: string;
   description: string | null;
   capabilities: SdkAppSummary['capabilities'];
+  icon?: string | null;
+  modality?: string | null;
+  inputSummary?: string | null;
 }
 
 interface AppPickerState {
@@ -185,6 +210,12 @@ function toGeneratedOutput(out: ExecutionOutput): GeneratedOutput | null {
 }
 
 function progressFromStatus(status: ExecutionStatus): number | null {
+  // Use real percentComplete from the API when available (Lamina PR #821)
+  const enriched = status as ExecutionStatusWithProgress;
+  if (typeof enriched.progress?.percentComplete === 'number') {
+    return Math.round(enriched.progress.percentComplete);
+  }
+  // Fallback for older API responses without granular progress
   switch (status.status) {
     case 'queued':
       return 10;
@@ -566,6 +597,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     error: null,
     mode: 'list',
   });
+  const [showAllApps, setShowAllApps] = useState(false);
 
   // Brand profile and campaign state
   const [brandProfiles, setBrandProfiles] = useState<BrandProfileEntry[]>([]);
@@ -573,6 +605,11 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const [selectedBrandId, setSelectedBrandId] = useState<string>('');
   const [selectedCampaignId, setSelectedCampaignId] = useState<string>('');
   const [brandsLoaded, setBrandsLoaded] = useState(false);
+
+  // AI brief suggestions via /v1/content/brief
+  const [aiSuggestions, setAiSuggestions] = useState<ContentConcept[]>([]);
+  const [aiSuggestionsLoading, setAiSuggestionsLoading] = useState(false);
+  const aiSuggestionsCacheKey = useRef<string | null>(null);
 
   // Batch generation state
   const [batchMode, setBatchMode] = useState(false);
@@ -584,6 +621,38 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       setSelectedAppId(activePreset.appId);
     }
   }, [activePreset?.appId, selectedAppId]);
+
+  // Fetch AI brief suggestions from /v1/content/brief
+  useEffect(() => {
+    const cacheKey = `${documentType}:${fieldName}:${selectedBrandId}`;
+    if (aiSuggestionsCacheKey.current === cacheKey) return;
+    aiSuggestionsCacheKey.current = cacheKey;
+
+    let cancelled = false;
+    (async () => {
+      setAiSuggestionsLoading(true);
+      try {
+        const resolvedModality = modality || (assetType === 'file' ? 'video' : 'image');
+        const briefParams: ContentBriefParams = {
+          goal: documentTitle
+            ? `${fieldName ? FIELD_LABELS[fieldName] || fieldName : 'media'} for ${documentType || 'document'}: ${documentTitle}`
+            : `${fieldName ? FIELD_LABELS[fieldName] || fieldName : 'media'} for ${documentType || 'content'}`,
+          modality: resolvedModality,
+          count: 3,
+          ...(selectedBrandId ? { brandProfileId: selectedBrandId } : {}),
+        };
+        const result = await client.content.brief(briefParams);
+        if (cancelled) return;
+        setAiSuggestions(result.data?.concepts ?? []);
+      } catch {
+        // AI suggestions are best-effort; fall back to static suggestions
+        if (!cancelled) setAiSuggestions([]);
+      } finally {
+        if (!cancelled) setAiSuggestionsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [client, documentType, documentTitle, fieldName, modality, assetType, selectedBrandId]);
 
   // Library picker state
   const [libraryFilter, setLibraryFilter] = useState<AssetTypeFilter>(
@@ -652,12 +721,18 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     if (!appPicker.expanded && appPicker.apps.length === 0) {
       try {
         const result = await client.apps.list();
-        const apps: AppEntry[] = (result.data ?? []).map((a) => ({
-          appId: a.appId,
-          name: a.name,
-          description: a.description,
-          capabilities: a.capabilities,
-        }));
+        const apps: AppEntry[] = (result.data ?? []).map((a) => {
+          const enriched = a as AppSummaryEnriched;
+          return {
+            appId: a.appId,
+            name: a.name,
+            description: a.description,
+            capabilities: a.capabilities,
+            icon: enriched.icon ?? null,
+            modality: enriched.modality ?? null,
+            inputSummary: enriched.inputSummary ?? null,
+          };
+        });
         setAppPicker((prev) => ({ ...prev, loading: false, apps, mode: 'list', error: null }));
       } catch (err) {
         setAppPicker((prev) => ({
@@ -675,12 +750,18 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     try {
       const result = await client.apps.discover({ intent: brief.trim() });
       const matches = result.data?.matches ?? [];
-      const apps: AppEntry[] = matches.map((a) => ({
-        appId: a.appId,
-        name: a.name,
-        description: a.description,
-        capabilities: a.capabilities,
-      }));
+      const apps: AppEntry[] = matches.map((a) => {
+        const enriched = a as typeof a & { icon?: string | null; modality?: string | null; inputSummary?: string | null };
+        return {
+          appId: a.appId,
+          name: a.name,
+          description: a.description,
+          capabilities: a.capabilities,
+          icon: enriched.icon ?? null,
+          modality: enriched.modality ?? null,
+          inputSummary: enriched.inputSummary ?? null,
+        };
+      });
       setAppPicker((prev) => ({ ...prev, loading: false, apps, mode: 'discover', error: null }));
     } catch (err) {
       setAppPicker((prev) => ({
@@ -691,13 +772,19 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     }
   }, [client, brief]);
 
+  // manageUrl from the cost estimate response
+  const [creditsManageUrl, setCreditsManageUrl] = useState<string | null>(null);
+
   const fetchEstimate = useCallback(async (appId: string) => {
     setEstimateLoading(true);
     try {
       const result = await client.apps.estimate(appId);
       setCostEstimate(result.data);
+      const enriched = result.data as CostEstimateWithManageUrl;
+      setCreditsManageUrl(enriched.credits?.manageUrl ?? null);
     } catch {
       setCostEstimate(null);
+      setCreditsManageUrl(null);
     } finally {
       setEstimateLoading(false);
     }
@@ -1304,18 +1391,44 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
               </Stack>
             ) : null}
             {!brief && isIdle ? (
-              <Inline space={1}>
-                {suggestions.map((s) => (
-                  <Button
-                    key={s}
-                    text={s}
-                    mode="ghost"
-                    fontSize={0}
-                    padding={2}
-                    onClick={() => setBrief(s)}
-                  />
-                ))}
-              </Inline>
+              <Stack space={2}>
+                {aiSuggestionsLoading ? (
+                  <Flex align="center" gap={2}>
+                    <Spinner />
+                    <Text size={0} muted>Getting suggestions...</Text>
+                  </Flex>
+                ) : aiSuggestions.length > 0 ? (
+                  <Stack space={1}>
+                    <Text size={0} muted weight="medium">Suggested for this context</Text>
+                    <Inline space={1}>
+                      {aiSuggestions.map((c) => (
+                        <Button
+                          key={c.title}
+                          text={c.prompt.length > 50 ? `${c.prompt.substring(0, 50)}...` : c.prompt}
+                          title={`${c.title}: ${c.rationale}`}
+                          mode="ghost"
+                          fontSize={0}
+                          padding={2}
+                          tone="primary"
+                          onClick={() => setBrief(c.prompt)}
+                        />
+                      ))}
+                    </Inline>
+                  </Stack>
+                ) : null}
+                <Inline space={1}>
+                  {suggestions.map((s) => (
+                    <Button
+                      key={s}
+                      text={s}
+                      mode="ghost"
+                      fontSize={0}
+                      padding={2}
+                      onClick={() => setBrief(s)}
+                    />
+                  ))}
+                </Inline>
+              </Stack>
             ) : null}
             <TextArea
               value={brief}
@@ -1504,46 +1617,83 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                       </Card>
                     ) : null}
                     {!appPicker.loading && appPicker.apps.length > 0 ? (
-                      <Box style={{ maxHeight: 240, overflowY: 'auto' }}>
-                        <Stack space={2}>
-                          {appPicker.apps.map((app) => (
-                            <Card
-                              key={app.appId}
-                              padding={2}
-                              radius={2}
-                              border
-                              tone={selectedAppId === app.appId ? 'primary' : 'default'}
-                              style={{ cursor: 'pointer' }}
-                              onClick={() => handleSelectApp(app)}
-                            >
-                              <Stack space={1}>
-                                <Flex align="center" gap={2}>
-                                  {selectedAppId === app.appId ? (
-                                    <CheckmarkCircleIcon />
+                      <>
+                        {/* Modality filter: show toggle when apps have modality metadata */}
+                        {appPicker.apps.some((a) => a.modality) && !showAllApps ? (
+                          <Flex align="center" justify="space-between">
+                            <Text size={0} muted>
+                              Filtered to {modality || (assetType === 'file' ? 'video' : 'image')} apps
+                            </Text>
+                            <Button
+                              text="Show all"
+                              mode="bleed"
+                              fontSize={0}
+                              padding={1}
+                              onClick={() => setShowAllApps(true)}
+                            />
+                          </Flex>
+                        ) : appPicker.apps.some((a) => a.modality) && showAllApps ? (
+                          <Flex align="center" justify="flex-end">
+                            <Button
+                              text="Filter by modality"
+                              mode="bleed"
+                              fontSize={0}
+                              padding={1}
+                              onClick={() => setShowAllApps(false)}
+                            />
+                          </Flex>
+                        ) : null}
+                        <Box style={{ maxHeight: 240, overflowY: 'auto' }}>
+                          <Stack space={2}>
+                            {appPicker.apps
+                              .filter((app) => {
+                                if (showAllApps || !app.modality) return true;
+                                const targetModality = modality || (assetType === 'file' ? 'video' : 'image');
+                                return app.modality === targetModality;
+                              })
+                              .map((app) => (
+                              <Card
+                                key={app.appId}
+                                padding={2}
+                                radius={2}
+                                border
+                                tone={selectedAppId === app.appId ? 'primary' : 'default'}
+                                style={{ cursor: 'pointer' }}
+                                onClick={() => handleSelectApp(app)}
+                              >
+                                <Stack space={1}>
+                                  <Flex align="center" gap={2}>
+                                    {app.icon ? (
+                                      <img
+                                        src={app.icon}
+                                        alt=""
+                                        style={{ width: 20, height: 20, borderRadius: 4, objectFit: 'cover' }}
+                                      />
+                                    ) : selectedAppId === app.appId ? (
+                                      <CheckmarkCircleIcon />
+                                    ) : null}
+                                    <Text size={1} weight="medium" style={{ flex: 1 }}>
+                                      {app.name}
+                                    </Text>
+                                    {app.capabilities?.outputFormats?.length ? (
+                                      <Text size={0} muted>
+                                        {app.capabilities.outputFormats.join(', ')}
+                                      </Text>
+                                    ) : null}
+                                  </Flex>
+                                  {app.inputSummary ? (
+                                    <Text size={0} muted>{app.inputSummary}</Text>
+                                  ) : app.description ? (
+                                    <Text size={1} muted>
+                                      {app.description}
+                                    </Text>
                                   ) : null}
-                                  <Text size={1} weight="medium">
-                                    {app.name}
-                                  </Text>
-                                </Flex>
-                                {app.description ? (
-                                  <Text size={1} muted>
-                                    {app.description}
-                                  </Text>
-                                ) : null}
-                                {app.capabilities?.produces?.length ? (
-                                  <Inline space={1}>
-                                    {app.capabilities.produces.slice(0, 3).map((cap) => (
-                                      <Card key={cap} padding={1} radius={2} tone="transparent">
-                                        <Text size={0} muted>{cap}</Text>
-                                      </Card>
-                                    ))}
-                                  </Inline>
-                                ) : null}
-                              </Stack>
-                            </Card>
-                          ))}
-                        </Stack>
-                      </Box>
+                                </Stack>
+                              </Card>
+                            ))}
+                          </Stack>
+                        </Box>
+                      </>
                     ) : null}
                     {!appPicker.loading && appPicker.apps.length === 0 && !appPicker.error ? (
                       <Text size={1} muted>No apps found.</Text>
@@ -1564,24 +1714,35 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
 
           {/* Credit estimate */}
           {selectedAppId && (costEstimate || estimateLoading) ? (
-            <Card padding={2} radius={2} border tone={costEstimate && !costEstimate.affordable ? 'critical' : 'default'}>
+            <Card padding={2} radius={2} border tone={costEstimate && !costEstimate.affordable ? 'caution' : 'default'}>
               {estimateLoading ? (
                 <Flex align="center" gap={2}>
                   <Spinner />
                   <Text size={1} muted>Estimating cost...</Text>
                 </Flex>
               ) : costEstimate ? (
-                <Flex align="center" justify="space-between">
-                  <Text size={1}>
-                    Est. {costEstimate.estimatedCredits.expected} credits
-                  </Text>
-                  <Text size={1} muted>
-                    Balance: {costEstimate.currentBalance}
-                  </Text>
+                <Stack space={2}>
+                  <Flex align="center" justify="space-between">
+                    <Text size={1}>
+                      Est. {costEstimate.estimatedCredits.expected} credits
+                    </Text>
+                    <Text size={1} muted>
+                      Balance: {costEstimate.currentBalance}
+                    </Text>
+                  </Flex>
                   {!costEstimate.affordable ? (
-                    <Text size={1} weight="medium">Insufficient balance</Text>
+                    <Flex align="center" justify="space-between">
+                      <Text size={1} weight="medium" style={{ color: 'var(--card-badge-caution-fg-color)' }}>
+                        Insufficient credits for this generation
+                      </Text>
+                      {creditsManageUrl ? (
+                        <a href={creditsManageUrl} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
+                          <Button text="Add credits" mode="ghost" tone="primary" fontSize={0} padding={2} as="span" />
+                        </a>
+                      ) : null}
+                    </Flex>
                   ) : null}
-                </Flex>
+                </Stack>
               ) : null}
             </Card>
           ) : null}
@@ -1638,19 +1799,45 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           {/* Progress */}
           {state.status === 'generating' ? (
             <Card padding={4} radius={2} tone="primary">
-              <Flex align="center" gap={3}>
-                <Spinner />
-                <Stack space={2}>
-                  <Text size={1} weight="medium">
-                    Generating...
-                  </Text>
-                  {state.progress !== null ? (
-                    <Text size={1} muted>
-                      {state.progress}% complete
+              <Stack space={3}>
+                <Flex align="center" gap={3}>
+                  <Spinner />
+                  <Stack space={2}>
+                    <Text size={1} weight="medium">
+                      {state.progress !== null && state.progress < 20
+                        ? 'Queued...'
+                        : state.progress !== null && state.progress >= 90
+                          ? 'Finalizing...'
+                          : 'Generating...'}
                     </Text>
-                  ) : null}
-                </Stack>
-              </Flex>
+                    {state.progress !== null ? (
+                      <Text size={1} muted>
+                        {state.progress}% complete
+                      </Text>
+                    ) : null}
+                  </Stack>
+                </Flex>
+                {state.progress !== null ? (
+                  <Box
+                    style={{
+                      height: 4,
+                      borderRadius: 2,
+                      backgroundColor: 'var(--card-border-color)',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <Box
+                      style={{
+                        height: '100%',
+                        width: `${state.progress}%`,
+                        backgroundColor: 'var(--card-focus-ring-color)',
+                        borderRadius: 2,
+                        transition: 'width 0.5s ease',
+                      }}
+                    />
+                  </Box>
+                ) : null}
+              </Stack>
             </Card>
           ) : null}
 
