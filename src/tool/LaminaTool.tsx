@@ -5,20 +5,22 @@ import {
   Card,
   Flex,
   Grid,
+  Select,
   Spinner,
   Stack,
   Tab,
   TabList,
   TabPanel,
   Text,
+  TextInput,
 } from '@sanity/ui';
-import { LaunchIcon, ImageIcon, ResetIcon } from '@sanity/icons';
+import { LaunchIcon, ImageIcon, ResetIcon, SearchIcon } from '@sanity/icons';
 import { useClient } from 'sanity';
 import { useLamina } from '../lib/LaminaContext.js';
 const LAMINA_ORIGIN = 'https://app.uselamina.ai';
 
 interface LaminaMessage {
-  type: 'lamina:asset-ready' | 'lamina:editor-close';
+  type: 'lamina:asset-ready' | 'lamina:editor-close' | 'lamina:embed-ready';
   url?: string;
   runId?: string;
   mediaType?: 'image' | 'video';
@@ -58,18 +60,46 @@ function formatFileSize(bytes: number | null): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+type AssetTypeFilter = 'all' | 'images' | 'videos';
+
+const PAGE_SIZE = 24;
+
+function buildAssetQuery(filter: AssetTypeFilter, search: string): string {
+  const typeConditions: Record<AssetTypeFilter, string> = {
+    all: '_type in ["sanity.imageAsset", "sanity.fileAsset"]',
+    images: '_type == "sanity.imageAsset"',
+    videos: '_type == "sanity.fileAsset" && mimeType match "video/*"',
+  };
+
+  const searchCondition = search.trim()
+    ? ` && originalFilename match "*${search.trim()}*"`
+    : '';
+
+  return `*[${typeConditions[filter]} && source.name == "lamina"${searchCondition}] | order(_createdAt desc)`;
+}
+
 function AssetBrowser() {
   const sanityClient = useClient({ apiVersion: '2024-01-01' });
   const [assets, setAssets] = useState<LaminaAsset[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [typeFilter, setTypeFilter] = useState<AssetTypeFilter>('all');
+  const [search, setSearch] = useState('');
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  const fetchAssets = useCallback(async () => {
-    setLoading(true);
+  const fetchAssets = useCallback(async (offset: number, append: boolean) => {
+    if (append) {
+      setLoadingMore(true);
+    } else {
+      setLoading(true);
+    }
     setError(null);
     try {
+      const query = buildAssetQuery(typeFilter, search);
       const result = await sanityClient.fetch<LaminaAsset[]>(
-        `*[_type in ["sanity.imageAsset", "sanity.fileAsset"] && source.name == "lamina"] | order(_createdAt desc) [0...50] {
+        `${query} [${offset}...${offset + PAGE_SIZE + 1}] {
           _id,
           _type,
           url,
@@ -80,17 +110,44 @@ function AssetBrowser() {
           source
         }`,
       );
-      setAssets(result ?? []);
+      const fetched = result ?? [];
+      const pageItems = fetched.slice(0, PAGE_SIZE);
+      setHasMore(fetched.length > PAGE_SIZE);
+      setAssets((prev) => (append ? [...prev, ...pageItems] : pageItems));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load assets');
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
-  }, [sanityClient]);
+  }, [sanityClient, typeFilter, search]);
 
+  // Reset and fetch when filter or search changes
   useEffect(() => {
-    fetchAssets();
+    fetchAssets(0, false);
   }, [fetchAssets]);
+
+  const handleLoadMore = useCallback(() => {
+    if (!loadingMore && hasMore) {
+      fetchAssets(assets.length, true);
+    }
+  }, [fetchAssets, assets.length, loadingMore, hasMore]);
+
+  // Infinite scroll: load more when scrolled near bottom
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const handleScroll = () => {
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+      if (nearBottom && hasMore && !loadingMore) {
+        handleLoadMore();
+      }
+    };
+
+    el.addEventListener('scroll', handleScroll);
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, [hasMore, loadingMore, handleLoadMore]);
 
   if (loading) {
     return (
@@ -110,100 +167,145 @@ function AssetBrowser() {
     );
   }
 
-  if (assets.length === 0) {
-    return (
-      <Flex align="center" justify="center" padding={5} direction="column" gap={3}>
-        <ImageIcon />
-        <Text size={1} muted>
-          No Lamina-generated assets yet
-        </Text>
-        <Text size={1} muted>
-          Generate assets using the editor or image field dropdowns
-        </Text>
-      </Flex>
-    );
-  }
-
   return (
-    <Box padding={3} style={{ overflowY: 'auto', height: '100%' }}>
-      <Stack space={3}>
-        <Flex align="center" justify="space-between">
-          <Text size={1} weight="medium">
-            {assets.length} Lamina asset{assets.length !== 1 ? 's' : ''}
-          </Text>
+    <Box padding={3} style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <Stack space={3} style={{ flexShrink: 0 }}>
+        {/* Filters */}
+        <Flex align="center" gap={2}>
+          <Box style={{ flex: 1 }}>
+            <TextInput
+              icon={SearchIcon}
+              value={search}
+              onChange={(e) => setSearch(e.currentTarget.value)}
+              placeholder="Search by filename..."
+              fontSize={1}
+            />
+          </Box>
+          <Select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.currentTarget.value as AssetTypeFilter)}
+            fontSize={1}
+            style={{ width: 130 }}
+          >
+            <option value="all">All types</option>
+            <option value="images">Images</option>
+            <option value="videos">Videos</option>
+          </Select>
           <Button
             icon={ResetIcon}
             mode="ghost"
             fontSize={1}
             padding={2}
-            text="Refresh"
-            onClick={fetchAssets}
+            title="Refresh"
+            onClick={() => fetchAssets(0, false)}
           />
         </Flex>
-        <Grid columns={3} gap={3}>
-          {assets.map((asset) => {
-            const isImage = asset._type === 'sanity.imageAsset';
-            return (
-              <Card key={asset._id} padding={2} radius={2} border>
-                <Stack space={2}>
-                  {isImage ? (
-                    <img
-                      src={`${asset.url}?w=200&h=200&fit=crop`}
-                      alt={asset.originalFilename ?? ''}
-                      style={{
-                        width: '100%',
-                        aspectRatio: '1',
-                        objectFit: 'cover',
-                        borderRadius: 4,
-                      }}
-                    />
-                  ) : (
-                    <Flex
-                      align="center"
-                      justify="center"
-                      style={{
-                        width: '100%',
-                        aspectRatio: '1',
-                        backgroundColor: 'var(--card-bg2-color)',
-                        borderRadius: 4,
-                      }}
-                    >
-                      <Text size={1} muted>
-                        {asset.mimeType?.split('/')[1]?.toUpperCase() || 'FILE'}
-                      </Text>
-                    </Flex>
-                  )}
-                  <Text size={0} textOverflow="ellipsis">
-                    {asset.originalFilename || asset._id}
-                  </Text>
-                  <Flex align="center" justify="space-between">
-                    <Text size={0} muted>
-                      {formatFileSize(asset.size)}
-                    </Text>
-                    {asset.source?.url ? (
-                      <Button
-                        text="Open run"
-                        mode="ghost"
-                        fontSize={0}
-                        padding={1}
-                        onClick={() =>
-                          window.open(asset.source!.url, '_blank', 'noopener')
-                        }
-                      />
-                    ) : null}
-                  </Flex>
-                </Stack>
-              </Card>
-            );
-          })}
-        </Grid>
+
+        <Text size={1} weight="medium">
+          {assets.length}{hasMore ? '+' : ''} Lamina asset{assets.length !== 1 ? 's' : ''}
+        </Text>
       </Stack>
+
+      {assets.length === 0 ? (
+        <Flex align="center" justify="center" padding={5} direction="column" gap={3} style={{ flex: 1 }}>
+          <ImageIcon />
+          <Text size={1} muted>
+            {search || typeFilter !== 'all'
+              ? 'No assets match your filters'
+              : 'No Lamina-generated assets yet'}
+          </Text>
+          {!search && typeFilter === 'all' ? (
+            <Text size={1} muted>
+              Generate assets using the editor or image field dropdowns
+            </Text>
+          ) : null}
+        </Flex>
+      ) : (
+        <Box ref={scrollRef} style={{ flex: 1, overflowY: 'auto', marginTop: 12 }}>
+          <Grid columns={3} gap={3}>
+            {assets.map((asset) => {
+              const isImage = asset._type === 'sanity.imageAsset';
+              return (
+                <Card key={asset._id} padding={2} radius={2} border>
+                  <Stack space={2}>
+                    {isImage ? (
+                      <img
+                        src={`${asset.url}?w=200&h=200&fit=crop`}
+                        alt={asset.originalFilename ?? ''}
+                        style={{
+                          width: '100%',
+                          aspectRatio: '1',
+                          objectFit: 'cover',
+                          borderRadius: 4,
+                        }}
+                      />
+                    ) : asset.mimeType?.startsWith('video/') ? (
+                      <video
+                        src={asset.url}
+                        muted
+                        loop
+                        autoPlay
+                        playsInline
+                        style={{
+                          width: '100%',
+                          aspectRatio: '1',
+                          objectFit: 'cover',
+                          borderRadius: 4,
+                        }}
+                      />
+                    ) : (
+                      <Flex
+                        align="center"
+                        justify="center"
+                        style={{
+                          width: '100%',
+                          aspectRatio: '1',
+                          backgroundColor: 'var(--card-bg2-color)',
+                          borderRadius: 4,
+                        }}
+                      >
+                        <Text size={1} muted>
+                          {asset.mimeType?.split('/')[1]?.toUpperCase() || 'FILE'}
+                        </Text>
+                      </Flex>
+                    )}
+                    <Text size={0} textOverflow="ellipsis">
+                      {asset.originalFilename || asset._id}
+                    </Text>
+                    <Flex align="center" justify="space-between">
+                      <Text size={0} muted>
+                        {formatFileSize(asset.size)}
+                      </Text>
+                      {asset.source?.url ? (
+                        <Button
+                          text="Open run"
+                          mode="ghost"
+                          fontSize={0}
+                          padding={1}
+                          onClick={() =>
+                            window.open(asset.source!.url, '_blank', 'noopener')
+                          }
+                        />
+                      ) : null}
+                    </Flex>
+                  </Stack>
+                </Card>
+              );
+            })}
+          </Grid>
+          {loadingMore ? (
+            <Flex align="center" justify="center" padding={4}>
+              <Spinner />
+            </Flex>
+          ) : null}
+        </Box>
+      )}
     </Box>
   );
 }
 
 export function LaminaTool() {
-  const { client: laminaClient, options } = useLamina();
+  const { client: laminaClient, options, token } = useLamina();
   const sanityClient = useClient({ apiVersion: '2024-01-01' });
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [saving, setSaving] = useState(false);
@@ -212,7 +314,8 @@ export function LaminaTool() {
   const [activeTab, setActiveTab] = useState<'editor' | 'assets'>('editor');
 
   const baseUrl = options.baseUrl || LAMINA_ORIGIN;
-  const embedUrl = `${baseUrl}/embed?token=${encodeURIComponent(options.apiKey ?? '')}`;
+  // Load iframe without credentials — auth is handled via postMessage handshake
+  const embedUrl = `${baseUrl}/embed`;
 
   const handleMessage = useCallback(
     async (event: MessageEvent) => {
@@ -220,6 +323,35 @@ export function LaminaTool() {
       if (!isLaminaMessage(event.data)) return;
 
       const msg = event.data;
+
+      // Step 2: Iframe signals it's ready — send auth credentials via postMessage
+      if (msg.type === 'lamina:embed-ready') {
+        const iframe = iframeRef.current;
+        if (!iframe?.contentWindow) return;
+
+        // Prefer OAuth token when available, fall back to API key
+        iframe.contentWindow.postMessage(
+          {
+            type: 'lamina:auth',
+            token,
+            authType: options.oauth ? 'oauth' : 'api-key',
+          },
+          baseUrl,
+        );
+
+        // Send document context (generic for standalone tool)
+        iframe.contentWindow.postMessage(
+          {
+            type: 'lamina:context',
+            schemaType: null,
+            fieldType: null,
+            brandProfileId: null,
+            suggestedModality: null,
+          },
+          baseUrl,
+        );
+        return;
+      }
 
       if (msg.type === 'lamina:asset-ready' && msg.url) {
         setSaving(true);
@@ -286,7 +418,7 @@ export function LaminaTool() {
         }
       }
     },
-    [baseUrl, laminaClient, sanityClient],
+    [baseUrl, laminaClient, sanityClient, token, options.oauth],
   );
 
   useEffect(() => {

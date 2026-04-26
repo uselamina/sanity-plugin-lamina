@@ -101,11 +101,19 @@ Key types from `@uselamina/sdk`:
 - [x] OAuth per-user auth — token storage, exchange, refresh, login UI
 - [x] Webhook URL support via `webhookUrl` plugin option
 - [x] README.md and LICENSE for npm/Sanity Exchange publishing
+- [x] PostMessage auth handshake — iframe loads `/embed` without token, credentials sent via `lamina:auth` message after `lamina:embed-ready`
+- [x] OAuth token preference — postMessage handshake uses OAuth token when available, falls back to API key
+- [x] Document context via postMessage — sends `lamina:context` with schema type, field type, brand profile, modality after auth
+- [x] Brand profile and campaign selection — GenerateDialog fetches `/v1/brand-profiles` and `/v1/campaigns`, passes to `content.create()`
+- [x] Batch generation UI — "Generate variants" toggle with count (2-5), runs parallel `content.create()` calls
+- [x] Webhook passthrough — passes `webhookUrl` to `runs.run()` when configured
+- [x] Video preview in asset browser — `<video>` element with autoplay loop for `video/*` assets
+- [x] Asset browser filtering — type filter (All/Images/Videos), filename search, cursor-based pagination with infinite scroll
 
 ## Lamina-side dependencies (in progress in cirbuk/react-flow-integration)
 
 1. `/embed` route for Studio Tool iframe
-2. `postMessage` protocol (`lamina:asset-ready`, `lamina:editor-close`)
+2. `postMessage` protocol (`lamina:embed-ready`, `lamina:auth`, `lamina:context`, `lamina:asset-ready`, `lamina:editor-close`)
 3. CORS on `cdn.uselamina.ai` for client-side asset fetch
 
 ## Build & test

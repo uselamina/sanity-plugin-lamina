@@ -15,6 +15,8 @@ const LAMINA_ORIGIN = 'https://app.uselamina.ai';
 interface LaminaContextValue {
   client: LaminaClient;
   options: LaminaPluginOptions;
+  /** The resolved API key or OAuth access token used by the client. */
+  token: string;
 }
 
 const Ctx = createContext<LaminaContextValue | null>(null);
@@ -176,7 +178,8 @@ export function LaminaProvider({
     );
   }
 
-  const value: LaminaContextValue = { client, options };
+  // resolvedKey is guaranteed non-null here since client is only created when resolvedKey is truthy
+  const value: LaminaContextValue = { client, options, token: resolvedKey! };
 
   return <Ctx value={value}>{children}</Ctx>;
 }
