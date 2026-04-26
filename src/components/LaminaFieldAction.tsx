@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { EditIcon } from '@sanity/icons';
+import { EditIcon, LaunchIcon } from '@sanity/icons';
 import { Button, Flex } from '@sanity/ui';
 import { useClient, useFormValue } from 'sanity';
 import { setDocumentContext } from '../lib/documentContext.js';
+
+interface LaminaAssetMeta {
+  source?: { name?: string; url?: string };
+  description?: string;
+}
 
 interface LaminaImageInputProps {
   value?: {
@@ -18,6 +23,7 @@ export function LaminaImageInput(props: LaminaImageInputProps) {
   const { value, renderDefault, ...rest } = props;
   const client = useClient({ apiVersion: '2024-01-01' });
   const [runUrl, setRunUrl] = useState<string | null>(null);
+  const [previousBrief, setPreviousBrief] = useState<string | null>(null);
 
   // Track document context for the embed iframe
   const documentTitle = useFormValue(['title']) as string | undefined;
@@ -41,25 +47,31 @@ export function LaminaImageInput(props: LaminaImageInputProps) {
   useEffect(() => {
     if (!assetRef) {
       setRunUrl(null);
+      setPreviousBrief(null);
       return;
     }
 
     let cancelled = false;
     client
-      .fetch<{ source?: { name?: string; url?: string } } | null>(
-        '*[_id == $id][0]{ source }',
+      .fetch<LaminaAssetMeta | null>(
+        '*[_id == $id][0]{ source, description }',
         { id: assetRef },
       )
       .then((result) => {
         if (cancelled) return;
         if (result?.source?.name === 'lamina' && result.source.url) {
           setRunUrl(result.source.url);
+          setPreviousBrief(result.description ?? null);
         } else {
           setRunUrl(null);
+          setPreviousBrief(null);
         }
       })
       .catch(() => {
-        if (!cancelled) setRunUrl(null);
+        if (!cancelled) {
+          setRunUrl(null);
+          setPreviousBrief(null);
+        }
       });
 
     return () => {
@@ -67,26 +79,63 @@ export function LaminaImageInput(props: LaminaImageInputProps) {
     };
   }, [client, assetRef]);
 
-  const handleEdit = useCallback(() => {
+  const handleOpenInLamina = useCallback(() => {
     if (runUrl) {
       window.open(runUrl, '_blank', 'noopener');
     }
   }, [runUrl]);
 
+  // Trigger the asset source dialog with previous brief pre-filled via
+  // a custom event that GenerateDialog listens for.
+  const handleRegenerate = useCallback(() => {
+    // Dispatch a custom event that the asset source dialog can pick up
+    // to pre-fill the brief from the previous generation.
+    window.dispatchEvent(
+      new CustomEvent('lamina:regenerate', {
+        detail: { brief: previousBrief },
+      }),
+    );
+    // Find and click the native "Generate with Lamina" asset source button
+    // to open the dialog. This traverses Sanity's DOM to trigger the picker.
+    const el = (rest as Record<string, unknown>).elementProps as
+      | { id?: string }
+      | undefined;
+    if (el?.id) {
+      const wrapper = document.getElementById(el.id);
+      const changeBtn = wrapper?.closest('[data-testid="file-input"]')
+        ?.querySelector('button[data-testid="file-input-upload-button"]')
+        ?? wrapper?.closest('[data-testid="image-input"]')
+          ?.querySelector('button[data-testid="file-input-upload-button"]');
+      if (changeBtn instanceof HTMLElement) {
+        changeBtn.click();
+      }
+    }
+  }, [previousBrief, rest]);
+
   return (
     <>
       {renderDefault({ ...rest, value, renderDefault })}
       {runUrl ? (
-        <Flex paddingTop={2}>
+        <Flex paddingTop={2} gap={2}>
           <Button
-            text="Edit in Lamina"
+            text={previousBrief ? 'Regenerate' : 'Edit in Lamina'}
             icon={EditIcon}
             mode="ghost"
             tone="primary"
             fontSize={1}
             padding={2}
-            onClick={handleEdit}
+            onClick={previousBrief ? handleRegenerate : handleOpenInLamina}
           />
+          {previousBrief ? (
+            <Button
+              icon={LaunchIcon}
+              mode="ghost"
+              fontSize={1}
+              padding={2}
+              title="Open original run in Lamina"
+              onClick={handleOpenInLamina}
+            />
+          ) : null}
         </Flex>
       ) : null}
     </>

@@ -41,6 +41,166 @@ function isLaminaMessage(data: unknown): data is LaminaMessage {
   );
 }
 
+interface HistoryEntry {
+  _id: string;
+  _type: string;
+  _createdAt: string;
+  url: string;
+  originalFilename: string | null;
+  mimeType: string | null;
+  description: string | null;
+  source: { name: string; id: string; url?: string } | null;
+}
+
+function formatDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  if (diffDays === 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) return `${diffDays} days ago`;
+  return d.toLocaleDateString();
+}
+
+function GenerationHistory() {
+  const sanityClient = useClient({ apiVersion: '2024-01-01' });
+  const [entries, setEntries] = useState<HistoryEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await sanityClient.fetch<HistoryEntry[]>(
+          `*[_type in ["sanity.imageAsset", "sanity.fileAsset"] && source.name == "lamina"] | order(_createdAt desc) [0...50] {
+            _id, _type, _createdAt, url, originalFilename, mimeType, description, source
+          }`,
+        );
+        if (!cancelled) setEntries(result ?? []);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load history');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [sanityClient]);
+
+  if (loading) {
+    return (
+      <Flex align="center" justify="center" padding={5}>
+        <Spinner />
+      </Flex>
+    );
+  }
+
+  if (error) {
+    return (
+      <Box padding={4}>
+        <Card padding={3} radius={2} tone="critical">
+          <Text size={1}>{error}</Text>
+        </Card>
+      </Box>
+    );
+  }
+
+  if (entries.length === 0) {
+    return (
+      <Flex align="center" justify="center" padding={5}>
+        <Text size={1} muted>No generation history yet</Text>
+      </Flex>
+    );
+  }
+
+  // Group by date
+  const groups: Array<{ label: string; items: HistoryEntry[] }> = [];
+  let currentLabel = '';
+  for (const entry of entries) {
+    const label = formatDate(entry._createdAt);
+    if (label !== currentLabel) {
+      groups.push({ label, items: [entry] });
+      currentLabel = label;
+    } else {
+      groups[groups.length - 1].items.push(entry);
+    }
+  }
+
+  return (
+    <Box padding={3}>
+      <Stack space={4}>
+        <Text size={1} weight="medium">Recent generations</Text>
+        {groups.map((group) => (
+          <Stack key={group.label} space={2}>
+            <Text size={0} muted weight="medium">{group.label}</Text>
+            {group.items.map((entry) => {
+              const isImage = entry._type === 'sanity.imageAsset';
+              return (
+                <Card key={entry._id} padding={2} radius={2} border>
+                  <Flex gap={3} align="center">
+                    {isImage ? (
+                      <img
+                        src={`${entry.url}?w=60&h=60&fit=crop`}
+                        alt=""
+                        style={{ width: 48, height: 48, borderRadius: 4, objectFit: 'cover', flexShrink: 0 }}
+                      />
+                    ) : (
+                      <Box
+                        style={{
+                          width: 48,
+                          height: 48,
+                          borderRadius: 4,
+                          backgroundColor: 'var(--card-bg2-color)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexShrink: 0,
+                        }}
+                      >
+                        <Text size={0} muted>
+                          {entry.mimeType?.split('/')[1]?.toUpperCase() || 'FILE'}
+                        </Text>
+                      </Box>
+                    )}
+                    <Stack space={1} style={{ flex: 1, minWidth: 0 }}>
+                      {entry.description ? (
+                        <Text size={1} textOverflow="ellipsis">
+                          {entry.description}
+                        </Text>
+                      ) : (
+                        <Text size={1} muted textOverflow="ellipsis">
+                          {entry.originalFilename || entry._id}
+                        </Text>
+                      )}
+                      <Text size={0} muted>
+                        {new Date(entry._createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {entry.mimeType ? ` · ${entry.mimeType}` : ''}
+                      </Text>
+                    </Stack>
+                    {entry.source?.url ? (
+                      <Button
+                        icon={LaunchIcon}
+                        mode="ghost"
+                        fontSize={0}
+                        padding={1}
+                        title="Open in Lamina"
+                        onClick={() => window.open(entry.source!.url, '_blank', 'noopener')}
+                      />
+                    ) : null}
+                  </Flex>
+                </Card>
+              );
+            })}
+          </Stack>
+        ))}
+      </Stack>
+    </Box>
+  );
+}
+
 function AssetBrowser() {
   const [typeFilter, setTypeFilter] = useState<AssetTypeFilter>('all');
   const [search, setSearch] = useState('');
@@ -126,9 +286,10 @@ export function LaminaTool() {
   const sanityClient = useClient({ apiVersion: '2024-01-01' });
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [saving, setSaving] = useState(false);
+  const [savingPhase, setSavingPhase] = useState<'downloading' | 'uploading' | null>(null);
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'editor' | 'assets'>('editor');
+  const [activeTab, setActiveTab] = useState<'editor' | 'assets' | 'history'>('editor');
 
   const baseUrl = options.baseUrl || LAMINA_ORIGIN;
   // Load iframe without credentials — auth is handled via postMessage handshake
@@ -172,6 +333,7 @@ export function LaminaTool() {
 
       if (msg.type === 'lamina:asset-ready' && msg.url) {
         setSaving(true);
+        setSavingPhase('downloading');
         setErrorMessage(null);
         try {
           const assetType = msg.mediaType === 'video' ? 'file' : 'image';
@@ -210,6 +372,7 @@ export function LaminaTool() {
 
           const blob = await response.blob();
 
+          setSavingPhase('uploading');
           try {
             await sanityClient.assets.upload(assetType, blob, {
               filename,
@@ -232,6 +395,7 @@ export function LaminaTool() {
           console.error('[sanity-plugin-lamina] Failed to save asset:', err);
         } finally {
           setSaving(false);
+          setSavingPhase(null);
         }
       }
     },
@@ -272,12 +436,21 @@ export function LaminaTool() {
                 fontSize={1}
                 padding={2}
               />
+              <Tab
+                id="lamina-tab-history"
+                label="History"
+                aria-controls="lamina-panel-history"
+                selected={activeTab === 'history'}
+                onClick={() => setActiveTab('history')}
+                fontSize={1}
+                padding={2}
+              />
             </TabList>
             {saving ? (
               <Flex align="center" gap={2}>
                 <Spinner />
                 <Text size={1} muted>
-                  Saving to Sanity...
+                  {savingPhase === 'uploading' ? 'Uploading to Sanity...' : 'Downloading asset...'}
                 </Text>
               </Flex>
             ) : null}
@@ -330,6 +503,14 @@ export function LaminaTool() {
           style={{ position: 'absolute', inset: 0, overflowY: 'auto' }}
         >
           <AssetBrowser />
+        </TabPanel>
+        <TabPanel
+          id="lamina-panel-history"
+          aria-labelledby="lamina-tab-history"
+          hidden={activeTab !== 'history'}
+          style={{ position: 'absolute', inset: 0, overflowY: 'auto' }}
+        >
+          <GenerationHistory />
         </TabPanel>
       </Box>
     </Flex>

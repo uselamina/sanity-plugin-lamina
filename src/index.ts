@@ -4,6 +4,7 @@ export { GenerateDialog } from './components/GenerateDialog.js';
 export { LaminaImageInput } from './components/LaminaFieldAction.js';
 export { LaminaTool } from './tool/LaminaTool.js';
 export { createRegenerateAction } from './actions/regenerateAction.js';
+export { createGenerateAllAction } from './actions/generateAllAction.js';
 export { useLamina, LaminaProvider } from './lib/LaminaContext.js';
 export { useLaminaAssets } from './lib/useLaminaAssets.js';
 export { detectAspectRatio, ASPECT_RATIO_OPTIONS } from './lib/aspectRatio.js';

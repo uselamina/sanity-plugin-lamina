@@ -108,6 +108,8 @@ function resolvePreset(
 
 /** 30 minutes in milliseconds. */
 const GENERATION_TIMEOUT_MS = 30 * 60 * 1000;
+/** Show a warning 5 minutes before timeout. */
+const TIMEOUT_WARNING_MS = GENERATION_TIMEOUT_MS - 5 * 60 * 1000;
 
 /** Prompt suggestions by schema type. */
 const SCHEMA_SUGGESTIONS: Record<string, string[]> = {
@@ -449,6 +451,56 @@ function ParameterField({
   }
 }
 
+/**
+ * Extracts a plain-text excerpt (up to 200 chars) from common document body fields.
+ * Handles plain strings and portable text arrays.
+ */
+function extractDocumentExcerpt(
+  body: unknown,
+  content: unknown,
+  description: string | undefined,
+  excerpt: string | undefined,
+): string | null {
+  // Prefer explicit excerpt/description (usually short summaries)
+  if (excerpt && typeof excerpt === 'string' && excerpt.trim()) {
+    return excerpt.trim().substring(0, 200);
+  }
+  if (description && typeof description === 'string' && description.trim()) {
+    return description.trim().substring(0, 200);
+  }
+
+  // Try to extract plain text from portable text blocks
+  const ptSource = body ?? content;
+  if (Array.isArray(ptSource)) {
+    const textParts: string[] = [];
+    for (const block of ptSource) {
+      if (
+        block &&
+        typeof block === 'object' &&
+        '_type' in block &&
+        (block as Record<string, unknown>)._type === 'block' &&
+        Array.isArray((block as Record<string, unknown>).children)
+      ) {
+        for (const child of (block as Record<string, unknown>).children as Array<Record<string, unknown>>) {
+          if (typeof child.text === 'string') {
+            textParts.push(child.text);
+          }
+        }
+      }
+      if (textParts.join(' ').length >= 200) break;
+    }
+    const joined = textParts.join(' ').trim();
+    if (joined) return joined.substring(0, 200);
+  }
+
+  // Plain string body
+  if (typeof ptSource === 'string' && ptSource.trim()) {
+    return ptSource.trim().substring(0, 200);
+  }
+
+  return null;
+}
+
 // -- Document context for brief pre-filling --
 
 interface DocumentContext {
@@ -527,6 +579,13 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     || useFormValue(['name']) as string | undefined;
   const documentType = useFormValue(['_type']) as string | undefined;
 
+  // Read common body fields to enrich AI brief suggestions (#51)
+  const rawBody = useFormValue(['body']) as unknown;
+  const rawContent = useFormValue(['content']) as unknown;
+  const rawDescription = useFormValue(['description']) as string | undefined;
+  const rawExcerpt = useFormValue(['excerpt']) as string | undefined;
+  const documentExcerpt = extractDocumentExcerpt(rawBody, rawContent, rawDescription, rawExcerpt);
+
   // Derive field name from the parent path if available
   const parentSchemaType = (props as unknown as Record<string, unknown>).schemaType as
     | { name?: string; description?: string; parent?: { name?: string } }
@@ -560,6 +619,19 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const effectiveAspectRatio: LaminaAspectRatio | null =
     aspectRatioOverride || detectedRatio?.ratio || null;
 
+  // Listen for regenerate events from field-level "Regenerate" button (#59)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.brief && typeof detail.brief === 'string') {
+        setBrief(detail.brief);
+        setBriefPreFilled(true);
+      }
+    };
+    window.addEventListener('lamina:regenerate', handler);
+    return () => window.removeEventListener('lamina:regenerate', handler);
+  }, []);
+
   // Pre-fill brief on first render if we have context
   useEffect(() => {
     if (!briefPreFilled && suggestedBrief && !brief) {
@@ -578,6 +650,10 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   // needsInput state
   const [needsInputCtx, setNeedsInputCtx] = useState<NeedsInputContext | null>(null);
   const [collectedInputs, setCollectedInputs] = useState<Record<string, unknown>>({});
+
+  // Timeout warning (#56)
+  const [timeoutWarning, setTimeoutWarning] = useState(false);
+  const timeoutWarningRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Multi-select state (#10)
   const [selectedOutputIds, setSelectedOutputIds] = useState<Set<string>>(new Set());
@@ -633,10 +709,13 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       setAiSuggestionsLoading(true);
       try {
         const resolvedModality = modality || (assetType === 'file' ? 'video' : 'image');
+        const goalParts = [
+          `${fieldName ? FIELD_LABELS[fieldName] || fieldName : 'media'} for ${documentType || 'content'}`,
+          ...(documentTitle ? [`: ${documentTitle}`] : []),
+          ...(documentExcerpt ? [` — ${documentExcerpt}`] : []),
+        ];
         const briefParams: ContentBriefParams = {
-          goal: documentTitle
-            ? `${fieldName ? FIELD_LABELS[fieldName] || fieldName : 'media'} for ${documentType || 'document'}: ${documentTitle}`
-            : `${fieldName ? FIELD_LABELS[fieldName] || fieldName : 'media'} for ${documentType || 'content'}`,
+          goal: goalParts.join(''),
           modality: resolvedModality,
           count: 3,
           ...(selectedBrandId ? { brandProfileId: selectedBrandId } : {}),
@@ -925,6 +1004,9 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     });
     setNeedsInputCtx(null);
     setCollectedInputs({});
+    setTimeoutWarning(false);
+    if (timeoutWarningRef.current) clearTimeout(timeoutWarningRef.current);
+    timeoutWarningRef.current = setTimeout(() => setTimeoutWarning(true), TIMEOUT_WARNING_MS);
 
     try {
       const resolvedModality =
@@ -936,6 +1018,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         ...(documentTitle ? { documentTitle } : {}),
         ...(fieldName ? { fieldName } : {}),
         ...(fieldDescription ? { fieldPurpose: fieldDescription } : {}),
+        ...(documentExcerpt ? { documentExcerpt } : {}),
       };
 
       const createParams: LaminaCreateParams & { aspectRatio?: string; metadata?: Record<string, string> } = {
@@ -1141,6 +1224,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   );
 
   const [selecting, setSelecting] = useState(false);
+  const [selectingPhase, setSelectingPhase] = useState<'downloading' | 'uploading' | null>(null);
 
   // -- Quality feedback state (#33) --
   const [feedbackState, setFeedbackState] = useState<{
@@ -1199,8 +1283,10 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const handleSelectOutput = useCallback(
     async (output: GeneratedOutput) => {
       setSelecting(true);
+      setSelectingPhase('downloading');
       try {
         const url = await resolveAssetUrl(output);
+        setSelectingPhase('uploading');
         const assets = [buildAsset(output, url)];
         setPendingAssets(assets);
         setFeedbackState({
@@ -1210,6 +1296,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         });
       } finally {
         setSelecting(false);
+        setSelectingPhase(null);
       }
     },
     [resolveAssetUrl, buildAsset, state.runId],
@@ -1231,6 +1318,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     const selected = state.outputs.filter((o) => selectedOutputIds.has(o.id));
     if (selected.length === 0) return;
     setSelecting(true);
+    setSelectingPhase('downloading');
     try {
       const resolved = await Promise.all(
         selected.map(async (o) => {
@@ -1238,6 +1326,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           return buildAsset(o, url);
         }),
       );
+      setSelectingPhase('uploading');
       setPendingAssets(resolved);
       setFeedbackState({
         runId: state.runId ?? selected[0].id,
@@ -1246,6 +1335,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       });
     } finally {
       setSelecting(false);
+      setSelectingPhase(null);
     }
   }, [state.outputs, state.runId, selectedOutputIds, resolveAssetUrl, buildAsset]);
 
@@ -1261,11 +1351,35 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     setNeedsInputCtx(null);
     setCollectedInputs({});
     setSelectedOutputIds(new Set());
+    setTimeoutWarning(false);
+    if (timeoutWarningRef.current) {
+      clearTimeout(timeoutWarningRef.current);
+      timeoutWarningRef.current = null;
+    }
   }, []);
 
   // Sanity types selectionType as 'single' but future versions may support 'multiple'
   const isMultiple = (selectionType as string) === 'multiple';
   const isIdle = state.status === 'idle' || state.status === 'failed';
+
+  // Keyboard shortcuts (#60): Cmd/Ctrl+Enter to generate, Escape to cancel
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        if (isIdle && brief.trim()) {
+          handleGenerate();
+        }
+      }
+      if (e.key === 'Escape' && state.status === 'generating') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleReset();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isIdle, brief, state.status, handleGenerate, handleReset]);
 
   return (
     <Dialog
@@ -1719,13 +1833,15 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                 <Stack space={2}>
                   <Flex align="center" justify="space-between">
                     <Text size={1}>
-                      Est. {costEstimate.estimatedCredits.expected} credits
+                      Est. {batchMode && batchCount > 1
+                        ? `${costEstimate.estimatedCredits.expected * batchCount} credits (${batchCount} x ${costEstimate.estimatedCredits.expected})`
+                        : `${costEstimate.estimatedCredits.expected} credits`}
                     </Text>
                     <Text size={1} muted>
                       Balance: {costEstimate.currentBalance}
                     </Text>
                   </Flex>
-                  {!costEstimate.affordable ? (
+                  {!costEstimate.affordable || (batchMode && batchCount > 1 && costEstimate.estimatedCredits.expected * batchCount > costEstimate.currentBalance) ? (
                     <Flex align="center" justify="space-between">
                       <Text size={1} weight="medium" style={{ color: 'var(--card-badge-caution-fg-color)' }}>
                         Insufficient credits for this generation
@@ -1856,6 +1972,13 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                     />
                   </Box>
                 ) : null}
+                {timeoutWarning ? (
+                  <Card padding={2} radius={2} tone="caution">
+                    <Text size={1}>
+                      Generation is taking longer than expected. It will time out in about 5 minutes.
+                    </Text>
+                  </Card>
+                ) : null}
               </Stack>
             </Card>
           ) : null}
@@ -1949,7 +2072,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                       ) : (
                         <Inline space={2}>
                           <Button
-                            text={selecting ? 'Saving...' : 'Use this'}
+                            text={selecting ? (selectingPhase === 'uploading' ? 'Uploading...' : 'Downloading...') : 'Use this'}
                             tone="positive"
                             icon={CheckmarkCircleIcon}
                             onClick={() => handleSelectOutput(output)}
@@ -1967,7 +2090,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
               {/* Multi-select action */}
               {isMultiple && selectedOutputIds.size > 0 ? (
                 <Button
-                  text={selecting ? 'Saving...' : `Use ${selectedOutputIds.size} selected`}
+                  text={selecting ? (selectingPhase === 'uploading' ? 'Uploading...' : 'Downloading...') : `Use ${selectedOutputIds.size} selected`}
                   tone="positive"
                   icon={CheckmarkCircleIcon}
                   onClick={handleUseSelected}

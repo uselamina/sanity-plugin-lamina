@@ -109,8 +109,18 @@ function OAuthLogin({
           Sign in with your Lamina account to generate and manage media assets.
         </Text>
         {error ? (
-          <Card padding={2} radius={2} tone="critical">
-            <Text size={1}>{error}</Text>
+          <Card padding={3} radius={2} tone="critical">
+            <Stack space={2}>
+              <Text size={1}>{error}</Text>
+              <Text size={0} muted>
+                Look for a popup blocked icon in your browser's address bar and allow popups for this site.
+              </Text>
+              <Button
+                text="Try again"
+                mode="ghost"
+                onClick={handleLogin}
+              />
+            </Stack>
           </Card>
         ) : null}
         {loading ? (
