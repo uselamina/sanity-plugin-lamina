@@ -2,43 +2,21 @@
 
 Sanity Studio plugin that lets content editors generate and manage media assets with [Lamina](https://uselamina.ai) directly inside Sanity Studio.
 
-## What you can generate
-
-![Product Shoots](https://cdn.sanity.io/images/nxxnxyyr/production/20a6d32531d3b2a5d9cbdd20e5dcd50fe49964d5-1024x1024.jpg?auto=format&fit=max&q=75&w=400)
-![Ad Variants](https://cdn.sanity.io/images/nxxnxyyr/production/81940a40ac0879d7d10322b523ce5a2b30eba305-800x1000.jpg?auto=format&fit=max&q=75&w=400)
-![Virtual Try-On](https://cdn.sanity.io/images/nxxnxyyr/production/65eea9de797a81786ff7c6fab8b08f08a7865c61-800x1000.jpg?auto=format&fit=max&q=75&w=400)
-![Instagram Reels](https://cdn.sanity.io/images/nxxnxyyr/production/38d98d8dca4b633d8135de9c8ee64e2eccfa348d-1080x1920.jpg?auto=format&fit=max&q=75&w=200)
-
-![Campaign Banners](https://cdn.sanity.io/images/nxxnxyyr/production/942f807749bcd6ecbdbfef611c30b78da01dfc1a-1920x1080.jpg?auto=format&fit=max&q=75&w=400)
-![Brand Films](https://cdn.sanity.io/images/nxxnxyyr/production/0a68f5d0169cb18a0dd299afeb635e331adc60c9-1920x1080.jpg?auto=format&fit=max&q=75&w=400)
-
-*Product shoots, ad variants, virtual try-ons, reels, campaign banners, brand films -- all generated from a brief.*
-
-## Preview
-
-### Generate Dialog
-
-Describe what you need, hit Generate, and pick from multiple output variants -- all without leaving Sanity Studio.
-
-![Generate with Lamina](screenshots/lamina-generate-flow.gif)
-
-### Studio Tool
-
-The Lamina tab gives you an embedded editor and a filterable asset browser for all Lamina-generated assets in your dataset.
-
-![Lamina Studio Tool](screenshots/lamina-studio-tool.gif)
+![Lamina Plugin Demo](screenshots/lamina-plugin-demo.gif)
 
 ## Features
 
 - **Asset Source** -- "Generate with Lamina" appears in every image/file field dropdown. Type a brief, Lamina generates media, click "Use this" to save it as a Sanity asset.
-- **Studio Tool** -- "Lamina" tab in top Studio nav with embedded Lamina editor and an asset browser showing all Lamina-generated assets in your dataset.
-- **Document Action** -- "Edit in Lamina" appears in the document action bar for documents with Lamina-sourced assets.
-- **Field-Level Button** -- "Edit in Lamina" button appears directly on image/file fields that have Lamina source metadata.
-- **App Picker** -- Browse or AI-match Lamina apps before generating, with credit cost estimates.
+- **Context-Aware** -- Auto-suggests briefs from document title, field name, and schema type. No prompt engineering needed.
+- **Aspect Ratio Detection** -- Detects the target aspect ratio from field name (e.g. heroImage -> 16:9, ogImage -> 16:9) and passes it to the API.
+- **Studio Tool** -- "Lamina" tab in top Studio nav with embedded Lamina editor and a filterable asset browser.
+- **From Library** -- Reuse previously generated Lamina assets directly from the Generate dialog.
+- **Output Presets** -- Configure per-field generation presets (aspect ratio, modality, platform) via plugin config.
 - **Batch Generation** -- Generate 2-5 variants at once with the "Generate variants" toggle.
+- **App Picker** -- Browse or AI-match Lamina apps before generating, with credit cost estimates.
+- **Smart History** -- Recently used prompts appear as suggestion chips. App selections are remembered per field type.
+- **Quality Feedback** -- Rate outputs after saving to improve future generation quality.
 - **Brand & Campaign** -- Select brand profiles and campaigns when available to keep outputs on-brand.
-- **Dynamic Inputs** -- When an app needs additional parameters, the dialog renders input fields automatically.
-- **Multi-Select** -- Select multiple generated outputs at once when the field supports it.
 - **OAuth Support** -- Optional per-user authentication alongside team-level API keys.
 
 ## Installation
