@@ -42,6 +42,7 @@ import type {
 } from '@uselamina/sdk';
 import { LaminaAuthError, LaminaRateLimitError } from '@uselamina/sdk';
 import { useLamina } from '../lib/LaminaContext.js';
+import { getRoutedAppId, saveRoutedAppId } from '../lib/appRouting.js';
 import type { GeneratedOutput, GenerationState } from '../types.js';
 
 const MODALITIES = [
@@ -508,8 +509,9 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const [costEstimate, setCostEstimate] = useState<CostEstimate | null>(null);
   const [estimateLoading, setEstimateLoading] = useState(false);
 
-  // App picker state
-  const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
+  // App picker state — auto-select from routing history
+  const routedAppId = getRoutedAppId(documentType, fieldName);
+  const [selectedAppId, setSelectedAppId] = useState<string | null>(routedAppId);
   const [selectedAppName, setSelectedAppName] = useState<string | null>(null);
   const [appPicker, setAppPicker] = useState<AppPickerState>({
     expanded: false,
@@ -911,6 +913,11 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         error: null,
         progress: 100,
       });
+
+      // Save app routing for future auto-selection
+      if (selectedAppId && outputs.length > 0) {
+        saveRoutedAppId(documentType, fieldName, selectedAppId);
+      }
     } catch (err) {
       if (abort.signal.aborted) return;
       const isTimeout =
@@ -924,7 +931,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         progress: null,
       }));
     }
-  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, client]);
+  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, documentType, fieldName, client]);
 
   // Proxy a CDN URL through transferAsset to avoid CORS issues
   const resolveAssetUrl = useCallback(
