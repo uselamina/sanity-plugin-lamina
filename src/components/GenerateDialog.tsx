@@ -240,6 +240,116 @@ function buildSuggestedBrief(ctx: DocumentContext): string {
   return parts.join(' ');
 }
 
+// -- Brief suggestion templates --
+
+const SCHEMA_SUGGESTIONS: Record<string, string[]> = {
+  product: [
+    'Product photo on clean white background',
+    'Lifestyle shot showing product in use',
+    'Social media ad with product and price overlay',
+    'Product comparison banner',
+  ],
+  blogPost: [
+    'Blog header illustration matching the topic',
+    'Social share image with title overlay',
+    'Inline content illustration',
+  ],
+  post: [
+    'Blog header illustration matching the topic',
+    'Social share image with title overlay',
+    'Inline content illustration',
+  ],
+  article: [
+    'Article header photo',
+    'Social share card with headline',
+    'In-article illustration',
+  ],
+  landingPage: [
+    'Hero banner for landing page',
+    'Feature section illustration',
+    'Testimonial background image',
+  ],
+  page: [
+    'Page hero image',
+    'Section background',
+    'Feature illustration',
+  ],
+  event: [
+    'Event poster',
+    'Social announcement graphic',
+    'Event banner image',
+  ],
+  project: [
+    'Project cover image',
+    'Portfolio showcase photo',
+    'Case study hero image',
+  ],
+  category: [
+    'Category banner image',
+    'Category icon illustration',
+  ],
+  _default: [
+    'Professional product photo',
+    'Marketing banner',
+    'Social media post',
+    'Illustration',
+  ],
+};
+
+const FIELD_SUGGESTIONS: Record<string, string[]> = {
+  heroImage: ['Wide hero banner', 'Full-width hero with text space'],
+  mainImage: ['Main featured image', 'Editorial photo'],
+  thumbnail: ['Square thumbnail preview', 'Small preview image'],
+  ogImage: ['Social share card (1200x630)', 'Open Graph preview image'],
+  coverImage: ['Cover photo', 'Wide cover banner'],
+  poster: ['Event poster', 'Portrait poster image'],
+  avatar: ['Profile avatar', 'Circular headshot'],
+  logo: ['Logo mark on transparent background', 'Wordmark logo'],
+  banner: ['Wide promotional banner', 'Announcement banner'],
+  icon: ['App icon illustration', 'Simple icon graphic'],
+  background: ['Subtle background texture', 'Abstract background pattern'],
+};
+
+const RECENT_BRIEFS_KEY = 'lamina_recent_briefs';
+const MAX_RECENT = 3;
+
+function getRecentBriefs(): string[] {
+  try {
+    const stored = localStorage.getItem(RECENT_BRIEFS_KEY);
+    return stored ? (JSON.parse(stored) as string[]).slice(0, MAX_RECENT) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentBrief(brief: string): void {
+  try {
+    const recent = getRecentBriefs().filter((b) => b !== brief);
+    recent.unshift(brief);
+    localStorage.setItem(RECENT_BRIEFS_KEY, JSON.stringify(recent.slice(0, MAX_RECENT)));
+  } catch {
+    // localStorage unavailable
+  }
+}
+
+function getSuggestions(documentType?: string, fieldName?: string): string[] {
+  const suggestions: string[] = [];
+
+  // Field-specific suggestions take priority
+  if (fieldName && FIELD_SUGGESTIONS[fieldName]) {
+    suggestions.push(...FIELD_SUGGESTIONS[fieldName]);
+  }
+
+  // Schema-type suggestions
+  const schemaKey = documentType && SCHEMA_SUGGESTIONS[documentType] ? documentType : '_default';
+  const schemaSuggestions = SCHEMA_SUGGESTIONS[schemaKey];
+  for (const s of schemaSuggestions) {
+    if (!suggestions.includes(s)) suggestions.push(s);
+  }
+
+  return suggestions.slice(0, 5);
+}
+
 export function GenerateDialog(props: AssetSourceComponentProps) {
   const {
     assetType: rawAssetType,
@@ -274,6 +384,12 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const [briefPreFilled, setBriefPreFilled] = useState(false);
   const [modality, setModality] = useState('');
 
+  // Brief suggestions
+  const localSuggestions = getSuggestions(documentType, fieldName);
+  const [aiSuggestions, setAiSuggestions] = useState<string[]>([]);
+  const [recentBriefs] = useState<string[]>(() => getRecentBriefs());
+  const showSuggestions = !brief || briefPreFilled;
+
   // Pre-fill brief on first render if we have context
   useEffect(() => {
     if (!briefPreFilled && suggestedBrief && !brief) {
@@ -281,6 +397,25 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       setBriefPreFilled(true);
     }
   }, [suggestedBrief, briefPreFilled, brief]);
+
+  // Async: fetch AI-powered suggestions from apps.discover
+  useEffect(() => {
+    if (!documentType && !fieldName) return;
+    let cancelled = false;
+    const intent = [documentType, fieldName, documentTitle].filter(Boolean).join(' ');
+    if (!intent) return;
+
+    client.apps.discover({ intent, limit: 2 }).then((result) => {
+      if (cancelled) return;
+      const names = (result.data?.matches ?? [])
+        .map((m) => m.description)
+        .filter((d): d is string => Boolean(d));
+      setAiSuggestions(names.slice(0, 2));
+    }).catch(() => {
+      // Discover not available — no AI suggestions
+    });
+    return () => { cancelled = true; };
+  }, [client, documentType, fieldName, documentTitle]);
   const [state, setState] = useState<GenerationState>({
     status: 'idle',
     runId: null,
@@ -541,6 +676,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     });
     setNeedsInputCtx(null);
     setCollectedInputs({});
+    saveRecentBrief(brief.trim());
 
     try {
       const resolvedModality =
@@ -810,6 +946,51 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           {/* Brief input */}
           <Stack space={2}>
             <Label size={1}>Describe what you need</Label>
+            {showSuggestions && (localSuggestions.length > 0 || aiSuggestions.length > 0 || recentBriefs.length > 0) ? (
+              <Flex gap={2} wrap="wrap">
+                {recentBriefs.map((rb) => (
+                  <Card
+                    key={`recent-${rb}`}
+                    padding={1}
+                    paddingX={2}
+                    radius={3}
+                    border
+                    tone="primary"
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => { setBrief(rb); setBriefPreFilled(false); }}
+                  >
+                    <Text size={0}>{rb.length > 40 ? `${rb.slice(0, 40)}...` : rb}</Text>
+                  </Card>
+                ))}
+                {localSuggestions.map((s) => (
+                  <Card
+                    key={s}
+                    padding={1}
+                    paddingX={2}
+                    radius={3}
+                    border
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => { setBrief(s); setBriefPreFilled(false); }}
+                  >
+                    <Text size={0}>{s}</Text>
+                  </Card>
+                ))}
+                {aiSuggestions.map((s) => (
+                  <Card
+                    key={`ai-${s}`}
+                    padding={1}
+                    paddingX={2}
+                    radius={3}
+                    border
+                    tone="positive"
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => { setBrief(s); setBriefPreFilled(false); }}
+                  >
+                    <Text size={0}>{s.length > 50 ? `${s.slice(0, 50)}...` : s}</Text>
+                  </Card>
+                ))}
+              </Flex>
+            ) : null}
             <TextArea
               value={brief}
               onChange={(e) => {
