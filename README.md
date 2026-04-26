@@ -14,6 +14,20 @@ Sanity Studio plugin that lets content editors generate and manage media assets 
 
 *Product shoots, ad variants, virtual try-ons, reels, campaign banners, brand films -- all generated from a brief.*
 
+## Preview
+
+### Generate Dialog
+
+Describe what you need, hit Generate, and pick from multiple output variants -- all without leaving Sanity Studio.
+
+![Generate with Lamina](screenshots/lamina-generate-flow.gif)
+
+### Studio Tool
+
+The Lamina tab gives you an embedded editor and a filterable asset browser for all Lamina-generated assets in your dataset.
+
+![Lamina Studio Tool](screenshots/lamina-studio-tool.gif)
+
 ## Features
 
 - **Asset Source** -- "Generate with Lamina" appears in every image/file field dropdown. Type a brief, Lamina generates media, click "Use this" to save it as a Sanity asset.
@@ -21,6 +35,8 @@ Sanity Studio plugin that lets content editors generate and manage media assets 
 - **Document Action** -- "Edit in Lamina" appears in the document action bar for documents with Lamina-sourced assets.
 - **Field-Level Button** -- "Edit in Lamina" button appears directly on image/file fields that have Lamina source metadata.
 - **App Picker** -- Browse or AI-match Lamina apps before generating, with credit cost estimates.
+- **Batch Generation** -- Generate 2-5 variants at once with the "Generate variants" toggle.
+- **Brand & Campaign** -- Select brand profiles and campaigns when available to keep outputs on-brand.
 - **Dynamic Inputs** -- When an app needs additional parameters, the dialog renders input fields automatically.
 - **Multi-Select** -- Select multiple generated outputs at once when the field supports it.
 - **OAuth Support** -- Optional per-user authentication alongside team-level API keys.
@@ -91,7 +107,7 @@ Generated assets are tagged with `source.name: 'lamina'` and include the run ID 
 The Lamina tab in the top nav provides:
 
 - **Editor tab** -- Embedded Lamina editor via iframe. Assets generated here are automatically saved to Sanity via postMessage bridge.
-- **Assets tab** -- Browse all Lamina-generated assets in your Sanity dataset with thumbnails, filenames, and links to the original Lamina run.
+- **Assets tab** -- Browse all Lamina-generated assets in your Sanity dataset with thumbnails, filenames, and links to the original Lamina run. Filter by type (images/videos), search by filename, and scroll to load more.
 
 ### Document Action
 
