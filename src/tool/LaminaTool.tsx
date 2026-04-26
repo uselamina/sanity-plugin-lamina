@@ -329,15 +329,13 @@ export function LaminaTool() {
         const iframe = iframeRef.current;
         if (!iframe?.contentWindow) return;
 
-        // Prefer OAuth token when available, fall back to API key
-        iframe.contentWindow.postMessage(
-          {
-            type: 'lamina:auth',
-            token,
-            authType: options.oauth ? 'oauth' : 'api-key',
-          },
-          baseUrl,
-        );
+        // Send credential in the field the Lamina-side embedAuthRouter expects:
+        // { token } for API keys → validateApiKey path
+        // { oauthToken } for OAuth → validateBearerToken path
+        const authPayload = options.oauth
+          ? { type: 'lamina:auth' as const, oauthToken: token }
+          : { type: 'lamina:auth' as const, token };
+        iframe.contentWindow.postMessage(authPayload, baseUrl);
 
         // Send document context (generic for standalone tool)
         iframe.contentWindow.postMessage(
