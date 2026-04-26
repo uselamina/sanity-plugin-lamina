@@ -11,6 +11,18 @@ export interface LaminaOAuthConfig {
   storageKey?: string;
 }
 
+/** Output format preset that maps a field name to generation parameters. */
+export interface LaminaPreset {
+  /** Aspect ratio hint passed to the generation API (e.g. '16:9', '1:1'). */
+  aspectRatio?: string;
+  /** Modality override (e.g. 'image', 'video'). */
+  modality?: string;
+  /** Target platform hint (e.g. 'instagram', 'twitter'). */
+  platform?: string;
+  /** Pin a specific Lamina app for this field. */
+  appId?: string;
+}
+
 export interface LaminaPluginOptions {
   /** Lamina API key (team-level auth). Falls back to per-user OAuth if not set. */
   apiKey?: string;
@@ -39,6 +51,14 @@ export interface LaminaPluginOptions {
    * @default true
    */
   enableDocumentAction?: boolean;
+  /**
+   * Output format presets mapping field names to generation parameters.
+   * Keys are matched against the schema field name (e.g. 'ogImage', 'thumbnail').
+   * Custom presets override the built-in defaults.
+   *
+   * Built-in defaults: ogImage, socialImage, storyImage, thumbnail, avatar.
+   */
+  presets?: Record<string, LaminaPreset>;
 }
 
 /** Metadata stored on Sanity asset documents for Lamina-generated assets. */

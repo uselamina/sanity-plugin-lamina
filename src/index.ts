@@ -17,6 +17,7 @@ export type {
   LaminaAssetSourceMeta,
   LaminaOAuthConfig,
   LaminaPluginOptions,
+  LaminaPreset,
 } from './types.js';
 export type { UseLaminaAssetsOptions, UseLaminaAssetsResult } from './lib/useLaminaAssets.js';
 export type { AssetPickerGridProps } from './components/AssetPickerGrid.js';
