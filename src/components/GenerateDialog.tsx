@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Box,
   Button,
@@ -44,6 +44,16 @@ const MODALITIES = [
 
 /** 30 minutes in milliseconds. */
 const GENERATION_TIMEOUT_MS = 30 * 60 * 1000;
+
+interface BrandProfileEntry {
+  id: string;
+  name: string;
+}
+
+interface CampaignEntry {
+  id: string;
+  name: string;
+}
 
 interface NeedsInputContext {
   message: string;
@@ -177,7 +187,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   } = props;
 
   const assetType = rawAssetType === 'image' ? 'image' : 'file';
-  const { client } = useLamina();
+  const { client, options } = useLamina();
   const [brief, setBrief] = useState('');
   const [modality, setModality] = useState('');
   const [state, setState] = useState<GenerationState>({
@@ -210,7 +220,43 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     mode: 'list',
   });
 
+  // Brand profile and campaign state
+  const [brandProfiles, setBrandProfiles] = useState<BrandProfileEntry[]>([]);
+  const [campaigns, setCampaigns] = useState<CampaignEntry[]>([]);
+  const [selectedBrandId, setSelectedBrandId] = useState<string>('');
+  const [selectedCampaignId, setSelectedCampaignId] = useState<string>('');
+  const [brandsLoaded, setBrandsLoaded] = useState(false);
+
+  // Batch generation state
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchCount, setBatchCount] = useState(2);
+
   const abortRef = useRef<AbortController | null>(null);
+
+  // -- Load brand profiles and campaigns on mount --
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [profilesRes, campaignsRes] = await Promise.allSettled([
+          client.request<{ data: BrandProfileEntry[] }>('/v1/brand-profiles'),
+          client.request<{ data: CampaignEntry[] }>('/v1/campaigns'),
+        ]);
+        if (cancelled) return;
+        if (profilesRes.status === 'fulfilled') {
+          setBrandProfiles(profilesRes.value.data ?? []);
+        }
+        if (campaignsRes.status === 'fulfilled') {
+          setCampaigns(campaignsRes.value.data ?? []);
+        }
+      } catch {
+        // Brand profiles / campaigns not available — hide the fields
+      } finally {
+        if (!cancelled) setBrandsLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [client]);
 
   // -- App picker handlers --
 
@@ -326,7 +372,10 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         return;
       }
 
-      const runResult = await client.runs.run(appId, { inputs: collectedInputs });
+      const runResult = await client.runs.run(appId, {
+        inputs: collectedInputs,
+        ...(options.webhookUrl ? { webhook: options.webhookUrl } : {}),
+      });
       if (abort.signal.aborted) return;
 
       const runId = runResult.data.runId;
@@ -381,7 +430,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         progress: null,
       }));
     }
-  }, [needsInputCtx, selectedAppId, collectedInputs, client]);
+  }, [needsInputCtx, selectedAppId, collectedInputs, options.webhookUrl, client]);
 
   // -- Main generate handler --
 
@@ -410,7 +459,67 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         brief: brief.trim(),
         modality: resolvedModality,
         ...(selectedAppId ? { appId: selectedAppId } : {}),
+        ...(selectedBrandId ? { brandProfileId: selectedBrandId } : {}),
+        ...(selectedCampaignId ? { campaignId: selectedCampaignId } : {}),
+        ...(options.webhookUrl ? { webhookUrl: options.webhookUrl } : {}),
       };
+
+      // Batch mode: run multiple content.create() calls in parallel for variants
+      if (batchMode && batchCount > 1) {
+        const createPromises = Array.from({ length: batchCount }, () =>
+          client.content.create(createParams),
+        );
+        const createResults = await Promise.allSettled(createPromises);
+        if (abort.signal.aborted) return;
+
+        const runIds = createResults
+          .filter(
+            (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof client.content.create>>> =>
+              r.status === 'fulfilled' && r.value.data.runId != null,
+          )
+          .map((r) => r.value.data.runId!);
+
+        if (runIds.length === 0) {
+          setState((prev) => ({
+            ...prev,
+            status: 'failed',
+            error: 'All batch runs failed to start.',
+            progress: null,
+          }));
+          return;
+        }
+
+        const allOutputs: GeneratedOutput[] = [];
+        for (const runId of runIds) {
+          const result = await client.runs.wait(runId, {
+            intervalMs: 3000,
+            timeoutMs: GENERATION_TIMEOUT_MS,
+            onPoll(status) {
+              if (abort.signal.aborted) return;
+              setState((prev) => ({
+                ...prev,
+                progress: progressFromStatus(status),
+              }));
+            },
+          });
+          if (abort.signal.aborted) return;
+          if (result.data.status === 'completed') {
+            const outputs = result.data.outputs
+              .map(toGeneratedOutput)
+              .filter((o): o is GeneratedOutput => o !== null);
+            allOutputs.push(...outputs);
+          }
+        }
+
+        setState({
+          status: 'completed',
+          runId: runIds[0] ?? null,
+          outputs: allOutputs,
+          error: allOutputs.length === 0 ? 'All batch runs failed.' : null,
+          progress: 100,
+        });
+        return;
+      }
 
       const createResult = await client.content.create(createParams);
 
@@ -493,7 +602,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         progress: null,
       }));
     }
-  }, [brief, modality, assetType, selectedAppId, client]);
+  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, client]);
 
   // Proxy a CDN URL through transferAsset to avoid CORS issues
   const resolveAssetUrl = useCallback(
@@ -634,6 +743,73 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
               ))}
             </Select>
           </Stack>
+
+          {/* Brand profile selector */}
+          {brandsLoaded && brandProfiles.length > 0 ? (
+            <Stack space={2}>
+              <Label size={1}>Brand profile</Label>
+              <Select
+                value={selectedBrandId}
+                onChange={(e) => setSelectedBrandId(e.currentTarget.value)}
+                disabled={state.status === 'generating'}
+              >
+                <option value="">None</option>
+                {brandProfiles.map((bp) => (
+                  <option key={bp.id} value={bp.id}>
+                    {bp.name}
+                  </option>
+                ))}
+              </Select>
+            </Stack>
+          ) : null}
+
+          {/* Campaign selector */}
+          {brandsLoaded && campaigns.length > 0 ? (
+            <Stack space={2}>
+              <Label size={1}>Campaign</Label>
+              <Select
+                value={selectedCampaignId}
+                onChange={(e) => setSelectedCampaignId(e.currentTarget.value)}
+                disabled={state.status === 'generating'}
+              >
+                <option value="">None</option>
+                {campaigns.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </Select>
+            </Stack>
+          ) : null}
+
+          {/* Batch mode toggle */}
+          {isIdle ? (
+            <Flex align="center" gap={3}>
+              <Button
+                text={batchMode ? 'Single output' : 'Generate variants'}
+                mode="ghost"
+                fontSize={1}
+                onClick={() => setBatchMode((v) => !v)}
+              />
+              {batchMode ? (
+                <Flex align="center" gap={2}>
+                  <Label size={1}>Count:</Label>
+                  <Select
+                    value={String(batchCount)}
+                    onChange={(e) => setBatchCount(Number(e.currentTarget.value))}
+                    fontSize={1}
+                    style={{ width: 60 }}
+                  >
+                    {[2, 3, 4, 5].map((n) => (
+                      <option key={n} value={String(n)}>
+                        {n}
+                      </option>
+                    ))}
+                  </Select>
+                </Flex>
+              ) : null}
+            </Flex>
+          ) : null}
 
           {/* App picker */}
           {isIdle ? (
