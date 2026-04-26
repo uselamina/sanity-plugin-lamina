@@ -43,6 +43,7 @@ import type {
 import { LaminaAuthError, LaminaRateLimitError } from '@uselamina/sdk';
 import { useLamina } from '../lib/LaminaContext.js';
 import { getRoutedAppId, saveRoutedAppId } from '../lib/appRouting.js';
+import { getRecentBriefs, saveRecentBrief } from '../lib/recentBriefs.js';
 import type { GeneratedOutput, GenerationState } from '../types.js';
 
 const MODALITIES = [
@@ -477,6 +478,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   });
 
   const suggestions = getSuggestions(documentType, assetType);
+  const recentBriefs = getRecentBriefs(documentType, fieldName);
 
   const [dialogTab, setDialogTab] = useState<'generate' | 'library'>('generate');
   const [brief, setBrief] = useState('');
@@ -914,9 +916,12 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         progress: 100,
       });
 
-      // Save app routing for future auto-selection
-      if (selectedAppId && outputs.length > 0) {
-        saveRoutedAppId(documentType, fieldName, selectedAppId);
+      // Save app routing and brief to recent history
+      if (outputs.length > 0) {
+        if (selectedAppId) {
+          saveRoutedAppId(documentType, fieldName, selectedAppId);
+        }
+        saveRecentBrief(documentType, fieldName, brief, selectedAppId ?? undefined);
       }
     } catch (err) {
       if (abort.signal.aborted) return;
@@ -1123,6 +1128,24 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           {/* Brief input */}
           <Stack space={2}>
             <Label size={1}>Describe what you need</Label>
+            {!brief && isIdle && recentBriefs.length > 0 ? (
+              <Stack space={1}>
+                <Text size={0} muted weight="medium">Recently used</Text>
+                <Inline space={1}>
+                  {recentBriefs.map((r) => (
+                    <Button
+                      key={r.brief}
+                      text={r.brief.length > 40 ? `${r.brief.substring(0, 40)}...` : r.brief}
+                      mode="ghost"
+                      fontSize={0}
+                      padding={2}
+                      tone="primary"
+                      onClick={() => setBrief(r.brief)}
+                    />
+                  ))}
+                </Inline>
+              </Stack>
+            ) : null}
             {!brief && isIdle ? (
               <Inline space={1}>
                 {suggestions.map((s) => (
