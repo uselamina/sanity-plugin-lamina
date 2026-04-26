@@ -1668,9 +1668,35 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
             </Card>
           ) : null}
 
-          {/* Results */}
+          {/* Results with side-by-side refinement */}
           {state.status === 'completed' && state.outputs.length > 0 && !feedbackState ? (
             <Stack space={3}>
+              {/* Refinement panel: brief + regenerate side by side with results */}
+              <Card padding={3} radius={2} border tone="transparent">
+                <Stack space={2}>
+                  <Label size={0}>Refine your brief and regenerate</Label>
+                  <Flex gap={2} align="flex-end">
+                    <Box style={{ flex: 1 }}>
+                      <TextArea
+                        value={brief}
+                        onChange={(e) => setBrief(e.currentTarget.value)}
+                        rows={2}
+                        fontSize={1}
+                      />
+                    </Box>
+                    <Button
+                      text="Regenerate"
+                      icon={ResetIcon}
+                      tone="primary"
+                      onClick={handleGenerate}
+                      disabled={!brief.trim()}
+                      fontSize={1}
+                      padding={3}
+                    />
+                  </Flex>
+                </Stack>
+              </Card>
+
               <Label size={1}>Generated assets</Label>
               <Grid columns={state.outputs.length > 1 ? 2 : 1} gap={3}>
                 {state.outputs.map((output) => (
@@ -1742,18 +1768,6 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                   disabled={selecting}
                 />
               ) : null}
-
-              {/* Regenerate */}
-              <Inline space={2}>
-                <Button
-                  text="Regenerate"
-                  tone="default"
-                  icon={ResetIcon}
-                  mode="ghost"
-                  onClick={handleReset}
-                  fontSize={1}
-                />
-              </Inline>
             </Stack>
           ) : null}
         </Stack>
