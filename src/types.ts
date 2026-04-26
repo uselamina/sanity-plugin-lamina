@@ -46,6 +46,8 @@ export interface LaminaAssetSourceMeta {
   name: 'lamina';
   id: string;
   url: string;
+  /** The Sanity document ID from which this asset was generated. */
+  documentId?: string;
 }
 
 /** A Lamina-sourced asset stored in Sanity. */

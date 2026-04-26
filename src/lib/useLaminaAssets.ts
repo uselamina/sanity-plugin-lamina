@@ -4,7 +4,7 @@ import type { AssetTypeFilter, LaminaAsset } from '../types.js';
 
 const PAGE_SIZE = 24;
 
-function buildAssetQuery(filter: AssetTypeFilter, search: string): string {
+function buildAssetQuery(filter: AssetTypeFilter, search: string, documentId?: string): string {
   const typeConditions: Record<AssetTypeFilter, string> = {
     all: '_type in ["sanity.imageAsset", "sanity.fileAsset"]',
     images: '_type == "sanity.imageAsset"',
@@ -15,13 +15,19 @@ function buildAssetQuery(filter: AssetTypeFilter, search: string): string {
     ? ` && originalFilename match "*${search.trim()}*"`
     : '';
 
-  return `*[${typeConditions[filter]} && source.name == "lamina"${searchCondition}] | order(_createdAt desc)`;
+  const documentCondition = documentId
+    ? ` && source.documentId == "${documentId}"`
+    : '';
+
+  return `*[${typeConditions[filter]} && source.name == "lamina"${searchCondition}${documentCondition}] | order(_createdAt desc)`;
 }
 
 export interface UseLaminaAssetsOptions {
   typeFilter: AssetTypeFilter;
   search: string;
   pageSize?: number;
+  /** When set, only return assets generated from this Sanity document. */
+  documentId?: string;
 }
 
 export interface UseLaminaAssetsResult {
@@ -36,7 +42,7 @@ export interface UseLaminaAssetsResult {
 }
 
 export function useLaminaAssets(options: UseLaminaAssetsOptions): UseLaminaAssetsResult {
-  const { typeFilter, search, pageSize = PAGE_SIZE } = options;
+  const { typeFilter, search, pageSize = PAGE_SIZE, documentId } = options;
   const sanityClient = useClient({ apiVersion: '2024-01-01' });
   const [assets, setAssets] = useState<LaminaAsset[]>([]);
   const [loading, setLoading] = useState(true);
@@ -55,7 +61,7 @@ export function useLaminaAssets(options: UseLaminaAssetsOptions): UseLaminaAsset
     }
     setError(null);
     try {
-      const query = buildAssetQuery(typeFilter, search);
+      const query = buildAssetQuery(typeFilter, search, documentId);
       const result = await sanityClient.fetch<LaminaAsset[]>(
         `${query} [${offset}...${offset + ps + 1}] {
           _id,
@@ -78,7 +84,7 @@ export function useLaminaAssets(options: UseLaminaAssetsOptions): UseLaminaAsset
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [sanityClient, typeFilter, search]);
+  }, [sanityClient, typeFilter, search, documentId]);
 
   // Reset and fetch when filter or search changes
   useEffect(() => {
