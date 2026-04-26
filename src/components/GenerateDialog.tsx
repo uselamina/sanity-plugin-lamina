@@ -52,6 +52,56 @@ const MODALITIES = [
 /** 30 minutes in milliseconds. */
 const GENERATION_TIMEOUT_MS = 30 * 60 * 1000;
 
+/** Prompt suggestions by schema type. */
+const SCHEMA_SUGGESTIONS: Record<string, string[]> = {
+  product: [
+    'Product photo on clean white background',
+    'Lifestyle shot showing product in use',
+    'Social media ad with product highlight',
+  ],
+  blogPost: [
+    'Blog header illustration matching the topic',
+    'Social share image with title overlay',
+  ],
+  article: [
+    'Article header image',
+    'Social share card for article',
+  ],
+  landingPage: [
+    'Hero banner for landing page',
+    'Feature section illustration',
+  ],
+  page: [
+    'Page hero banner',
+    'Section background image',
+  ],
+};
+
+const DEFAULT_IMAGE_SUGGESTIONS = [
+  'Product photo',
+  'Marketing banner',
+  'Social media post',
+];
+
+const DEFAULT_VIDEO_SUGGESTIONS = [
+  'Product demo video',
+  'Social media reel',
+  'Promotional clip',
+];
+
+function getSuggestions(documentType: string | undefined, assetType: 'image' | 'file'): string[] {
+  if (documentType) {
+    const match = SCHEMA_SUGGESTIONS[documentType];
+    if (match) return match;
+    // Try lowercase match
+    const lower = documentType.toLowerCase();
+    for (const [key, suggestions] of Object.entries(SCHEMA_SUGGESTIONS)) {
+      if (lower.includes(key.toLowerCase())) return suggestions;
+    }
+  }
+  return assetType === 'file' ? DEFAULT_VIDEO_SUGGESTIONS : DEFAULT_IMAGE_SUGGESTIONS;
+}
+
 interface BrandProfileEntry {
   id: string;
   name: string;
@@ -275,6 +325,8 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     fieldName,
     fieldDescription,
   });
+
+  const suggestions = getSuggestions(documentType, assetType);
 
   const [dialogTab, setDialogTab] = useState<'generate' | 'library'>('generate');
   const [brief, setBrief] = useState('');
@@ -915,6 +967,20 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           {/* Brief input */}
           <Stack space={2}>
             <Label size={1}>Describe what you need</Label>
+            {!brief && isIdle ? (
+              <Inline space={1}>
+                {suggestions.map((s) => (
+                  <Button
+                    key={s}
+                    text={s}
+                    mode="ghost"
+                    fontSize={0}
+                    padding={2}
+                    onClick={() => setBrief(s)}
+                  />
+                ))}
+              </Inline>
+            ) : null}
             <TextArea
               value={brief}
               onChange={(e) => {
