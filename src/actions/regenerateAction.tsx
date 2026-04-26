@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
-import { ResetIcon } from '@sanity/icons';
+import { ResetIcon, LaunchIcon } from '@sanity/icons';
+import { Box, Button, Card, Flex, Stack, Text } from '@sanity/ui';
 import type {
   DocumentActionComponent,
   DocumentActionProps,
@@ -141,6 +142,14 @@ async function findLaminaAssets(
   return results;
 }
 
+/** Formats a field path for display (e.g. "heroImage" → "Hero Image"). */
+function formatFieldPath(path: string): string {
+  // Take the last segment for display
+  const segments = path.split('.');
+  const last = segments[segments.length - 1].replace(/\[\d+\]$/, '');
+  return last.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase()).trim();
+}
+
 export function createRegenerateAction(): DocumentActionComponent {
   const RegenerateAction: DocumentActionComponent = (
     props: DocumentActionProps,
@@ -149,6 +158,7 @@ export function createRegenerateAction(): DocumentActionComponent {
     const client = useClient({ apiVersion: '2024-01-01' });
     const schema = useSchema();
     const [checking, setChecking] = useState(false);
+    const [pickerAssets, setPickerAssets] = useState<LaminaAssetRef[] | null>(null);
 
     const schemaType = schema.get(documentType);
     const canHaveAssets = schemaContainsAssetFields(schemaType);
@@ -158,13 +168,19 @@ export function createRegenerateAction(): DocumentActionComponent {
       setChecking(true);
       try {
         const laminaAssets = await findLaminaAssets(client, documentId);
-        if (laminaAssets.length > 0) {
+        if (laminaAssets.length === 1) {
           window.open(laminaAssets[0].runUrl, '_blank', 'noopener');
+        } else if (laminaAssets.length > 1) {
+          setPickerAssets(laminaAssets);
         }
       } finally {
         setChecking(false);
       }
     }, [client, documentId]);
+
+    const handleClosePicker = useCallback(() => {
+      setPickerAssets(null);
+    }, []);
 
     if (!canHaveAssets || !hasDocument) return null;
 
@@ -173,6 +189,54 @@ export function createRegenerateAction(): DocumentActionComponent {
       icon: ResetIcon,
       onHandle: handleClick,
       disabled: checking,
+      dialog: pickerAssets
+        ? {
+            type: 'dialog' as const,
+            header: 'Edit in Lamina',
+            onClose: handleClosePicker,
+            content: (
+              <Box padding={4}>
+                <Stack space={3}>
+                  <Text size={1} muted>
+                    This document has {pickerAssets.length} Lamina-generated assets.
+                    Choose which one to edit:
+                  </Text>
+                  {pickerAssets.map((asset) => (
+                    <Card
+                      key={`${asset.fieldPath}-${asset.runId}`}
+                      padding={3}
+                      radius={2}
+                      border
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => {
+                        window.open(asset.runUrl, '_blank', 'noopener');
+                        setPickerAssets(null);
+                      }}
+                    >
+                      <Flex align="center" justify="space-between">
+                        <Stack space={2}>
+                          <Text size={1} weight="medium">
+                            {formatFieldPath(asset.fieldPath)}
+                          </Text>
+                          <Text size={0} muted>
+                            {asset.fieldPath}
+                          </Text>
+                        </Stack>
+                        <Button
+                          icon={LaunchIcon}
+                          mode="ghost"
+                          fontSize={1}
+                          padding={2}
+                          title="Open in Lamina"
+                        />
+                      </Flex>
+                    </Card>
+                  ))}
+                </Stack>
+              </Box>
+            ),
+          }
+        : null,
     };
   };
 
