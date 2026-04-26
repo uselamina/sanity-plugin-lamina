@@ -11,6 +11,9 @@ import {
   Select,
   Spinner,
   Stack,
+  Tab,
+  TabList,
+  TabPanel,
   Text,
   TextArea,
   TextInput,
@@ -25,6 +28,9 @@ import {
 } from '@sanity/icons';
 import type { AssetFromSource, AssetSourceComponentProps } from 'sanity';
 import { useFormValue } from 'sanity';
+import { useLaminaAssets } from '../lib/useLaminaAssets.js';
+import { AssetPickerGrid } from './AssetPickerGrid.js';
+import type { AssetTypeFilter, LaminaAsset } from '../types.js';
 import type {
   AppSummary as SdkAppSummary,
   CostEstimate,
@@ -270,6 +276,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     fieldDescription,
   });
 
+  const [dialogTab, setDialogTab] = useState<'generate' | 'library'>('generate');
   const [brief, setBrief] = useState('');
   const [briefPreFilled, setBriefPreFilled] = useState(false);
   const [modality, setModality] = useState('');
@@ -321,6 +328,29 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   // Batch generation state
   const [batchMode, setBatchMode] = useState(false);
   const [batchCount, setBatchCount] = useState(2);
+
+  // Library picker state
+  const [libraryFilter, setLibraryFilter] = useState<AssetTypeFilter>(
+    assetType === 'image' ? 'images' : 'all',
+  );
+  const [librarySearch, setLibrarySearch] = useState('');
+  const libraryAssets = useLaminaAssets({
+    typeFilter: libraryFilter,
+    search: librarySearch,
+    pageSize: 12,
+  });
+
+  const handleSelectFromLibrary = useCallback(
+    (asset: LaminaAsset) => {
+      onSelect([
+        {
+          kind: 'assetDocumentId',
+          value: asset._id,
+        } as AssetFromSource,
+      ]);
+    },
+    [onSelect],
+  );
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -805,6 +835,81 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       width={2}
       open
     >
+      <Box padding={3} paddingBottom={0}>
+        <TabList space={1}>
+          <Tab
+            id="lamina-dialog-generate"
+            label="Generate"
+            aria-controls="lamina-dialog-panel-generate"
+            selected={dialogTab === 'generate'}
+            onClick={() => setDialogTab('generate')}
+            fontSize={1}
+            padding={2}
+          />
+          <Tab
+            id="lamina-dialog-library"
+            label="From library"
+            aria-controls="lamina-dialog-panel-library"
+            selected={dialogTab === 'library'}
+            onClick={() => setDialogTab('library')}
+            fontSize={1}
+            padding={2}
+          />
+        </TabList>
+      </Box>
+
+      {/* Library tab */}
+      <TabPanel
+        id="lamina-dialog-panel-library"
+        aria-labelledby="lamina-dialog-library"
+        hidden={dialogTab !== 'library'}
+      >
+        <Box padding={4}>
+          <Stack space={3}>
+            <Flex align="center" gap={2}>
+              <Box style={{ flex: 1 }}>
+                <TextInput
+                  icon={SearchIcon}
+                  value={librarySearch}
+                  onChange={(e) => setLibrarySearch(e.currentTarget.value)}
+                  placeholder="Search by filename..."
+                  fontSize={1}
+                />
+              </Box>
+              <Select
+                value={libraryFilter}
+                onChange={(e) => setLibraryFilter(e.currentTarget.value as AssetTypeFilter)}
+                fontSize={1}
+                style={{ width: 130 }}
+              >
+                <option value="all">All types</option>
+                <option value="images">Images</option>
+                <option value="videos">Videos</option>
+              </Select>
+            </Flex>
+            <Text size={0} muted>{libraryAssets.totalLabel}</Text>
+            <Box style={{ maxHeight: 400, overflowY: 'auto' }}>
+              <AssetPickerGrid
+                assets={libraryAssets.assets}
+                loading={libraryAssets.loading}
+                loadingMore={libraryAssets.loadingMore}
+                hasMore={libraryAssets.hasMore}
+                columns={2}
+                onSelect={handleSelectFromLibrary}
+                onLoadMore={libraryAssets.loadMore}
+                emptyMessage="No Lamina assets yet. Generate some first!"
+              />
+            </Box>
+          </Stack>
+        </Box>
+      </TabPanel>
+
+      {/* Generate tab */}
+      <TabPanel
+        id="lamina-dialog-panel-generate"
+        aria-labelledby="lamina-dialog-generate"
+        hidden={dialogTab !== 'generate'}
+      >
       <Box padding={4}>
         <Stack space={4}>
           {/* Brief input */}
@@ -1203,6 +1308,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           ) : null}
         </Stack>
       </Box>
+      </TabPanel>
     </Dialog>
   );
 }
