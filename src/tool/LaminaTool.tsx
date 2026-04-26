@@ -17,6 +17,7 @@ import {
 import { LaunchIcon, ImageIcon, ResetIcon, SearchIcon } from '@sanity/icons';
 import { useClient } from 'sanity';
 import { useLamina } from '../lib/LaminaContext.js';
+import { getDocumentContext } from '../lib/documentContext.js';
 const LAMINA_ORIGIN = 'https://app.uselamina.ai';
 
 interface LaminaMessage {
@@ -337,14 +338,16 @@ export function LaminaTool() {
           : { type: 'lamina:auth' as const, token };
         iframe.contentWindow.postMessage(authPayload, baseUrl);
 
-        // Send document context (generic for standalone tool)
+        // Send document context from last-viewed document (if available)
+        const docCtx = getDocumentContext();
         iframe.contentWindow.postMessage(
           {
             type: 'lamina:context',
-            schemaType: null,
-            fieldType: null,
+            schemaType: docCtx?.documentType ?? null,
+            documentTitle: docCtx?.documentTitle ?? null,
+            fieldType: docCtx?.fieldType ?? null,
             brandProfileId: null,
-            suggestedModality: null,
+            suggestedModality: docCtx?.fieldType === 'file' ? 'video' : docCtx?.fieldType === 'image' ? 'image' : null,
           },
           baseUrl,
         );

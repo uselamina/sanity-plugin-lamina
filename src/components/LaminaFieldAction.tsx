@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { EditIcon } from '@sanity/icons';
 import { Button, Flex } from '@sanity/ui';
-import { useClient } from 'sanity';
+import { useClient, useFormValue } from 'sanity';
+import { setDocumentContext } from '../lib/documentContext.js';
 
 interface LaminaImageInputProps {
   value?: {
@@ -17,6 +18,23 @@ export function LaminaImageInput(props: LaminaImageInputProps) {
   const { value, renderDefault, ...rest } = props;
   const client = useClient({ apiVersion: '2024-01-01' });
   const [runUrl, setRunUrl] = useState<string | null>(null);
+
+  // Track document context for the embed iframe
+  const documentTitle = useFormValue(['title']) as string | undefined;
+  const documentId = useFormValue(['_id']) as string | undefined;
+  const documentType = useFormValue(['_type']) as string | undefined;
+
+  useEffect(() => {
+    if (documentId && documentType) {
+      setDocumentContext({
+        documentId,
+        documentType,
+        documentTitle: documentTitle ?? null,
+        fieldName: null,
+        fieldType: 'image',
+      });
+    }
+  }, [documentId, documentType, documentTitle]);
 
   const assetRef = value?.asset?._ref ?? null;
 
