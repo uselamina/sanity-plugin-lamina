@@ -1003,17 +1003,82 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
 
   const [selecting, setSelecting] = useState(false);
 
+  // -- Quality feedback state (#33) --
+  const [feedbackState, setFeedbackState] = useState<{
+    runId: string;
+    outputId: string;
+    submitted: boolean;
+  } | null>(null);
+  const [pendingAssets, setPendingAssets] = useState<AssetFromSource[] | null>(null);
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const finishAndClose = useCallback(() => {
+    if (feedbackTimerRef.current) {
+      clearTimeout(feedbackTimerRef.current);
+      feedbackTimerRef.current = null;
+    }
+    if (pendingAssets) {
+      onSelect(pendingAssets);
+    }
+    setPendingAssets(null);
+    setFeedbackState(null);
+  }, [pendingAssets, onSelect]);
+
+  const submitFeedback = useCallback(
+    async (rating: 'positive' | 'negative') => {
+      if (!feedbackState) return;
+      setFeedbackState((prev) => (prev ? { ...prev, submitted: true } : null));
+      try {
+        await client.request(`/v1/runs/${feedbackState.runId}/feedback`, {
+          method: 'POST',
+          body: {
+            feedback:
+              rating === 'positive'
+                ? 'The output was good and matched the brief well.'
+                : 'The output could be improved - it did not fully match the brief.',
+          },
+        });
+      } catch {
+        // Feedback is best-effort, don't block the user
+      }
+      finishAndClose();
+    },
+    [feedbackState, client, finishAndClose],
+  );
+
+  // Start the auto-close timer whenever feedback UI appears
+  useEffect(() => {
+    if (feedbackState && !feedbackState.submitted) {
+      feedbackTimerRef.current = setTimeout(() => {
+        finishAndClose();
+      }, 5000);
+      return () => {
+        if (feedbackTimerRef.current) {
+          clearTimeout(feedbackTimerRef.current);
+          feedbackTimerRef.current = null;
+        }
+      };
+    }
+    return undefined;
+  }, [feedbackState, finishAndClose]);
+
   const handleSelectOutput = useCallback(
     async (output: GeneratedOutput) => {
       setSelecting(true);
       try {
         const url = await resolveAssetUrl(output);
-        onSelect([buildAsset(output, url)]);
+        const assets = [buildAsset(output, url)];
+        setPendingAssets(assets);
+        setFeedbackState({
+          runId: state.runId ?? output.id,
+          outputId: output.id,
+          submitted: false,
+        });
       } finally {
         setSelecting(false);
       }
     },
-    [resolveAssetUrl, buildAsset, onSelect],
+    [resolveAssetUrl, buildAsset, state.runId],
   );
 
   const handleToggleOutput = useCallback((outputId: string) => {
@@ -1039,11 +1104,16 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           return buildAsset(o, url);
         }),
       );
-      onSelect(resolved);
+      setPendingAssets(resolved);
+      setFeedbackState({
+        runId: state.runId ?? selected[0].id,
+        outputId: selected[0].id,
+        submitted: false,
+      });
     } finally {
       setSelecting(false);
     }
-  }, [state.outputs, selectedOutputIds, resolveAssetUrl, buildAsset, onSelect]);
+  }, [state.outputs, state.runId, selectedOutputIds, resolveAssetUrl, buildAsset]);
 
   const handleReset = useCallback(() => {
     abortRef.current?.abort();
@@ -1499,8 +1569,22 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
             </Card>
           ) : null}
 
+          {/* Feedback prompt (#33) */}
+          {feedbackState && !feedbackState.submitted ? (
+            <Card padding={4} radius={2} tone="positive">
+              <Stack space={3}>
+                <Text size={1} weight="medium">Asset saved! How was the result?</Text>
+                <Inline space={2}>
+                  <Button text="Great" tone="positive" onClick={() => submitFeedback('positive')} />
+                  <Button text="Could be better" mode="ghost" onClick={() => submitFeedback('negative')} />
+                  <Button text="Skip" mode="bleed" fontSize={0} onClick={() => finishAndClose()} />
+                </Inline>
+              </Stack>
+            </Card>
+          ) : null}
+
           {/* Results */}
-          {state.status === 'completed' && state.outputs.length > 0 ? (
+          {state.status === 'completed' && state.outputs.length > 0 && !feedbackState ? (
             <Stack space={3}>
               <Label size={1}>Generated assets</Label>
               <Grid columns={state.outputs.length > 1 ? 2 : 1} gap={3}>
