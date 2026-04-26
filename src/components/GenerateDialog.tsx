@@ -45,6 +45,8 @@ import { LaminaAuthError, LaminaRateLimitError } from '@uselamina/sdk';
 import { useLamina } from '../lib/LaminaContext.js';
 import { getRoutedAppId, saveRoutedAppId } from '../lib/appRouting.js';
 import { getRecentBriefs, saveRecentBrief } from '../lib/recentBriefs.js';
+import { detectAspectRatio, ASPECT_RATIO_OPTIONS } from '../lib/aspectRatio.js';
+import type { LaminaAspectRatio } from '../lib/aspectRatio.js';
 import type { GeneratedOutput, GenerationState } from '../types.js';
 
 const MODALITIES = [
@@ -487,6 +489,12 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const [briefPreFilled, setBriefPreFilled] = useState(false);
   const [modality, setModality] = useState('');
 
+  // -- Aspect ratio auto-detection --
+  const detectedRatio = detectAspectRatio(fieldName);
+  const [aspectRatioOverride, setAspectRatioOverride] = useState<LaminaAspectRatio | ''>('');
+  const effectiveAspectRatio: LaminaAspectRatio | null =
+    aspectRatioOverride || detectedRatio?.ratio || null;
+
   // Pre-fill brief on first render if we have context
   useEffect(() => {
     if (!briefPreFilled && suggestedBrief && !brief) {
@@ -802,7 +810,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         ...(fieldDescription ? { fieldPurpose: fieldDescription } : {}),
       };
 
-      const createParams: LaminaCreateParams = {
+      const createParams: LaminaCreateParams & { aspectRatio?: string; metadata?: Record<string, string> } = {
         brief: brief.trim(),
         modality: resolvedModality,
         ...(selectedAppId ? { appId: selectedAppId } : {}),
@@ -810,6 +818,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         ...(selectedCampaignId ? { campaignId: selectedCampaignId } : {}),
         ...(options.webhookUrl ? { webhookUrl: options.webhookUrl } : {}),
         ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+        ...(effectiveAspectRatio ? { aspectRatio: effectiveAspectRatio } : {}),
       };
 
       // Batch mode: run multiple content.create() calls in parallel for variants
@@ -958,7 +967,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         progress: null,
       }));
     }
-  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, client, documentType, documentTitle, fieldName, fieldDescription]);
+  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, effectiveAspectRatio, client, documentType, documentTitle, fieldName, fieldDescription]);
 
   // Proxy a CDN URL through transferAsset to avoid CORS issues
   const resolveAssetUrl = useCallback(
@@ -1296,6 +1305,29 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                 </option>
               ))}
             </Select>
+          </Stack>
+
+          {/* Aspect ratio */}
+          <Stack space={2}>
+            <Label size={1}>Aspect ratio</Label>
+            <Select
+              value={aspectRatioOverride}
+              onChange={(e) =>
+                setAspectRatioOverride(e.currentTarget.value as LaminaAspectRatio | '')
+              }
+              disabled={state.status === 'generating'}
+            >
+              {ASPECT_RATIO_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </Select>
+            {!aspectRatioOverride && detectedRatio ? (
+              <Text size={0} muted>
+                Detected: {detectedRatio.label}
+              </Text>
+            ) : null}
           </Stack>
 
           {/* Brand profile selector */}
