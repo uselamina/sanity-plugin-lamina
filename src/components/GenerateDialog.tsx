@@ -20,6 +20,7 @@ import {
   TextInput,
 } from '@sanity/ui';
 import {
+  BoltIcon,
   CheckmarkCircleIcon,
   ChevronDownIcon,
   ChevronUpIcon,
@@ -29,7 +30,7 @@ import {
   UploadIcon,
 } from '@sanity/icons';
 import type { AssetFromSource, AssetSourceComponentProps } from 'sanity';
-import { useFormValue } from 'sanity';
+import { useFormValue, useSchema } from 'sanity';
 import { useLaminaAssets } from '../lib/useLaminaAssets.js';
 import { AssetPickerGrid } from './AssetPickerGrid.js';
 import type { AssetTypeFilter, LaminaAsset, LaminaPreset } from '../types.js';
@@ -70,6 +71,11 @@ import { getRecentBriefs, saveRecentBrief } from '../lib/recentBriefs.js';
 import { detectAspectRatio, ASPECT_RATIO_OPTIONS } from '../lib/aspectRatio.js';
 import type { LaminaAspectRatio } from '../lib/aspectRatio.js';
 import type { GeneratedOutput, GenerationState } from '../types.js';
+import { enhanceBrief } from '../lib/briefEnhancer.js';
+import type { EnhanceResult } from '../lib/briefEnhancer.js';
+import { useTypeahead } from '../lib/useTypeahead.js';
+import { getFieldMeta, extractSiblingContext, buildSchemaAwarePrompt } from '../lib/schemaContext.js';
+import type { SiblingValue } from '../lib/schemaContext.js';
 
 const MODALITIES = [
   { value: '', label: 'Auto-detect' },
@@ -687,6 +693,41 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const [aiSuggestionsLoading, setAiSuggestionsLoading] = useState(false);
   const aiSuggestionsCacheKey = useRef<string | null>(null);
 
+  // -- Enhance brief state (#66) --
+  const [enhanceEnabled, setEnhanceEnabled] = useState(true);
+  const [enhanceResult, setEnhanceResult] = useState<EnhanceResult | null>(null);
+  const [enhanceLoading, setEnhanceLoading] = useState(false);
+  /** Tracks whether the current brief came from an AI suggestion (already optimized). */
+  const [briefFromAi, setBriefFromAi] = useState(false);
+
+  // -- Schema-aware context (#67) --
+  const sanitySchema = useSchema();
+  const schemaType = documentType ? sanitySchema.get(documentType) : undefined;
+  const fieldMeta = getFieldMeta(schemaType, fieldName ?? '');
+  const siblingValues: SiblingValue[] = extractSiblingContext(schemaType, (name) => {
+    // We read a limited set of known context fields via useFormValue equivalents.
+    // Since hooks can't be called dynamically, we read them via the already-extracted values.
+    if (name === 'title') return documentTitle;
+    if (name === 'description') return rawDescription;
+    return undefined;
+  });
+  const schemaAwarePrompt = buildSchemaAwarePrompt(fieldMeta, siblingValues, documentType, documentTitle ?? undefined);
+
+  // -- Typeahead hook (#65) --
+  const typeahead = useTypeahead(
+    client,
+    brief,
+    {
+      modality: modality || (assetType === 'file' ? 'video' : 'image'),
+      brandProfileId: selectedBrandId || undefined,
+      documentType,
+      documentTitle: documentTitle ?? undefined,
+      fieldName,
+      documentExcerpt: documentExcerpt ?? undefined,
+    },
+    (state.status === 'idle' || state.status === 'failed') && brief.length >= 8,
+  );
+
   // Batch generation state
   const [batchMode, setBatchMode] = useState(false);
   const [batchCount, setBatchCount] = useState(2);
@@ -1012,6 +1053,26 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       const resolvedModality =
         modality || (assetType === 'file' ? 'video' : 'image');
 
+      // -- Enhance brief before generation (#66) --
+      let finalBrief = brief.trim();
+      if (enhanceEnabled && !briefFromAi) {
+        setEnhanceLoading(true);
+        const result = await enhanceBrief(client, finalBrief, {
+          modality: resolvedModality,
+          brandProfileId: selectedBrandId || undefined,
+          documentType,
+          documentTitle: documentTitle ?? undefined,
+          fieldName,
+          documentExcerpt: documentExcerpt ?? undefined,
+        });
+        setEnhanceLoading(false);
+        if (abort.signal.aborted) return;
+        if (result) {
+          setEnhanceResult(result);
+          finalBrief = result.enhanced;
+        }
+      }
+
       // Silent enrichment — context from the document, not visible in UI
       const metadata: Record<string, string> = {
         ...(documentType ? { documentType } : {}),
@@ -1019,10 +1080,15 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         ...(fieldName ? { fieldName } : {}),
         ...(fieldDescription ? { fieldPurpose: fieldDescription } : {}),
         ...(documentExcerpt ? { documentExcerpt } : {}),
+        // Schema-aware enrichment (#67)
+        ...(fieldMeta?.description ? { fieldSchemaDescription: fieldMeta.description } : {}),
+        ...(siblingValues.length > 0
+          ? { documentContext: siblingValues.map((s) => `${s.fieldName}: ${s.value}`).join('; ') }
+          : {}),
       };
 
       const createParams: LaminaCreateParams & { aspectRatio?: string; metadata?: Record<string, string> } = {
-        brief: brief.trim(),
+        brief: finalBrief,
         modality: resolvedModality,
         ...(activePreset?.aspectRatio ? { aspectRatio: activePreset.aspectRatio } : {}),
         ...(activePreset?.platform ? { platform: activePreset.platform } : {}),
@@ -1180,7 +1246,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         progress: null,
       }));
     }
-  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, effectiveAspectRatio, activePreset, client, documentType, documentTitle, fieldName, fieldDescription]);
+  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, effectiveAspectRatio, activePreset, client, documentType, documentTitle, fieldName, fieldDescription, documentExcerpt, enhanceEnabled, briefFromAi, fieldMeta, siblingValues]);
 
   // Proxy a CDN URL through transferAsset to avoid CORS issues
   const resolveAssetUrl = useCallback(
@@ -1352,6 +1418,8 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     setCollectedInputs({});
     setSelectedOutputIds(new Set());
     setTimeoutWarning(false);
+    setEnhanceResult(null);
+    setEnhanceLoading(false);
     if (timeoutWarningRef.current) {
       clearTimeout(timeoutWarningRef.current);
       timeoutWarningRef.current = null;
@@ -1501,6 +1569,21 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
             ) : null}
             {!brief && isIdle ? (
               <Stack space={2}>
+                {/* Schema-aware suggestion (#67) */}
+                {schemaAwarePrompt ? (
+                  <Stack space={1}>
+                    <Text size={0} muted weight="medium">From your schema</Text>
+                    <Button
+                      text={schemaAwarePrompt.length > 60 ? `${schemaAwarePrompt.substring(0, 60)}...` : schemaAwarePrompt}
+                      title={schemaAwarePrompt}
+                      mode="ghost"
+                      fontSize={0}
+                      padding={2}
+                      tone="positive"
+                      onClick={() => setBrief(schemaAwarePrompt)}
+                    />
+                  </Stack>
+                ) : null}
                 {aiSuggestionsLoading ? (
                   <Flex align="center" gap={2}>
                     <Spinner />
@@ -1519,7 +1602,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                           fontSize={0}
                           padding={2}
                           tone="primary"
-                          onClick={() => setBrief(c.prompt)}
+                          onClick={() => { setBrief(c.prompt); setBriefFromAi(true); }}
                         />
                       ))}
                     </Inline>
@@ -1543,16 +1626,75 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
               value={brief}
               onChange={(e) => {
                 setBrief(e.currentTarget.value);
+                setBriefFromAi(false);
                 if (briefPreFilled) setBriefPreFilled(false);
               }}
               placeholder="Product photo of white sneakers on marble surface, lifestyle aesthetic"
               rows={3}
               disabled={state.status === 'generating'}
             />
+            {/* Typeahead suggestions as you type (#65) */}
+            {brief && isIdle && typeahead.suggestions.length > 0 ? (
+              <Stack space={1}>
+                <Flex align="center" gap={2}>
+                  <Text size={0} muted weight="medium">Suggestions</Text>
+                  {typeahead.loading ? <Spinner /> : null}
+                </Flex>
+                <Inline space={1}>
+                  {typeahead.suggestions.map((c) => (
+                    <Button
+                      key={c.title}
+                      text={c.prompt.length > 50 ? `${c.prompt.substring(0, 50)}...` : c.prompt}
+                      title={`${c.title}: ${c.rationale}`}
+                      mode="ghost"
+                      fontSize={0}
+                      padding={2}
+                      tone="primary"
+                      onClick={() => { setBrief(c.prompt); setBriefFromAi(true); typeahead.clear(); }}
+                    />
+                  ))}
+                </Inline>
+              </Stack>
+            ) : brief && isIdle && typeahead.loading ? (
+              <Flex align="center" gap={2}>
+                <Spinner />
+                <Text size={0} muted>Finding suggestions...</Text>
+              </Flex>
+            ) : null}
             {briefPreFilled && suggestedBrief ? (
               <Text size={0} muted>
                 Suggested from document context
               </Text>
+            ) : null}
+            {/* Enhance brief toggle (#66) */}
+            {isIdle ? (
+              <Flex align="center" gap={2}>
+                <Checkbox
+                  id="lamina-enhance-brief"
+                  checked={enhanceEnabled}
+                  onChange={(e) => setEnhanceEnabled(e.currentTarget.checked)}
+                />
+                <Label htmlFor="lamina-enhance-brief" size={0} muted>
+                  Enhance brief before generating
+                </Label>
+                <BoltIcon style={{ opacity: enhanceEnabled ? 1 : 0.3 }} />
+              </Flex>
+            ) : null}
+            {/* Show enhanced brief preview after generation starts */}
+            {enhanceResult && state.status !== 'idle' ? (
+              <Card padding={2} radius={2} tone="positive" border>
+                <Stack space={1}>
+                  <Text size={0} weight="medium">Enhanced: {enhanceResult.title}</Text>
+                  <Text size={0} muted>{enhanceResult.enhanced}</Text>
+                  <Text size={0} muted style={{ fontStyle: 'italic' }}>{enhanceResult.rationale}</Text>
+                </Stack>
+              </Card>
+            ) : null}
+            {enhanceLoading ? (
+              <Flex align="center" gap={2}>
+                <Spinner />
+                <Text size={0} muted>Enhancing your brief...</Text>
+              </Flex>
             ) : null}
           </Stack>
 
