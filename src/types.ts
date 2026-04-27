@@ -1,6 +1,12 @@
 export interface LaminaOAuthConfig {
-  /** OAuth client ID for Lamina. */
-  clientId: string;
+  /**
+   * OAuth client ID for Lamina. Optional — when omitted, the plugin
+   * dynamically registers itself with the Lamina auth server on the first
+   * "Sign in with Lamina" click and caches the assigned client ID in
+   * localStorage. Set this explicitly only if your operations team has
+   * pre-provisioned a client_id (rare).
+   */
+  clientId?: string;
   /**
    * OAuth redirect URI. Defaults to `{window.location.origin}/lamina/callback`.
    */

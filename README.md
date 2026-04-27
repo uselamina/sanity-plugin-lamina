@@ -6,18 +6,19 @@ Sanity Studio plugin that lets content editors generate and manage media assets 
 
 ## Features
 
-- **Asset Source** -- "Generate with Lamina" appears in every image/file field dropdown. Type a brief, Lamina generates media, click "Use this" to save it as a Sanity asset.
-- **Context-Aware** -- Auto-suggests briefs from document title, field name, and schema type. No prompt engineering needed.
-- **Aspect Ratio Detection** -- Detects the target aspect ratio from field name (e.g. heroImage -> 16:9, ogImage -> 16:9) and passes it to the API.
-- **Studio Tool** -- "Lamina" tab in top Studio nav with embedded Lamina editor and a filterable asset browser.
-- **From Library** -- Reuse previously generated Lamina assets directly from the Generate dialog.
-- **Output Presets** -- Configure per-field generation presets (aspect ratio, modality, platform) via plugin config.
-- **Batch Generation** -- Generate 2-5 variants at once with the "Generate variants" toggle.
-- **App Picker** -- Browse or AI-match Lamina apps before generating, with credit cost estimates.
-- **Smart History** -- Recently used prompts appear as suggestion chips. App selections are remembered per field type.
-- **Quality Feedback** -- Rate outputs after saving to improve future generation quality.
-- **Brand & Campaign** -- Select brand profiles and campaigns when available to keep outputs on-brand.
-- **OAuth Support** -- Optional per-user authentication alongside team-level API keys.
+- **Asset Source** — "Generate with Lamina" appears in every image/file field dropdown. Type a brief, Lamina generates media, click "Use this" to save it as a Sanity asset.
+- **Context-Aware Briefs** — Auto-suggests briefs from document title, field name, and schema type. No prompt engineering needed.
+- **Aspect Ratio Detection** — Detects target aspect ratio from field name (e.g. `heroImage` → 16:9, `ogImage` → 16:9) and passes it to the API.
+- **Studio Tool** — "Lamina" tab in top Studio nav with embedded Lamina editor and a filterable asset browser.
+- **Document Actions** — "Edit in Lamina" reopens the original generation run; "Generate all media" fills every empty image/file field on a document in a single pass.
+- **From Library** — Reuse previously generated Lamina assets directly from the Generate dialog.
+- **Output Presets** — Configure per-field generation presets (aspect ratio, modality, platform) via plugin config.
+- **Batch Generation** — Generate 2–5 variants at once with the "Generate variants" toggle.
+- **App Picker** — Browse or auto-match Lamina apps before generating, with credit cost estimates.
+- **Smart History** — Recently used briefs appear as suggestion chips. App selections are remembered per field.
+- **Quality Feedback** — Rate outputs after saving to improve future generation quality.
+- **Brand & Campaign** — Apply brand profiles and campaign context to keep outputs on-brand.
+- **Per-Editor OAuth** *(optional)* — Each editor authorises individually instead of sharing a workspace API key. The plugin self-registers with Lamina on first sign-in — no manual setup needed.
 
 ## Installation
 
@@ -25,71 +26,113 @@ Sanity Studio plugin that lets content editors generate and manage media assets 
 npm install sanity-plugin-lamina
 ```
 
-## Configuration
+## Quick start (API key — recommended)
 
-```ts
-// sanity.config.ts
-import { defineConfig } from 'sanity'
-import { laminaPlugin } from 'sanity-plugin-lamina'
+1. Sign up at [app.uselamina.ai](https://app.uselamina.ai) (or log in to an existing workspace).
+2. **Workspace settings → API Keys → Create API Key.** Pick these scopes:
+   - `runs:read` `runs:write`
+   - `content:create`
+   - `assets:write`
+3. Copy the `lma_…` value.
+4. In your Sanity Studio:
 
-export default defineConfig({
-  // ...your config
-  plugins: [
-    laminaPlugin({
-      apiKey: process.env.SANITY_STUDIO_LAMINA_API_KEY!,
-    }),
-  ],
-})
-```
+   ```ts
+   // sanity.config.ts
+   import {defineConfig} from 'sanity'
+   import {laminaPlugin} from 'sanity-plugin-lamina'
 
-### Options
+   export default defineConfig({
+     // ...your project config
+     plugins: [
+       laminaPlugin({
+         apiKey: process.env.SANITY_STUDIO_LAMINA_API_KEY!,
+       }),
+     ],
+   })
+   ```
+
+5. Add the key to `.env.development` (and your hosting platform's env for prod):
+
+   ```
+   SANITY_STUDIO_LAMINA_API_KEY=lma_…
+   ```
+
+6. `npm run dev` — open any image or file field. "Generate with Lamina ✨" appears in the upload dropdown.
+
+> **Note for multi-environment teams:** the same API key works across local, staging, and production. Use one key per workspace, set in each environment's env vars.
+
+## Configuration options
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `apiKey` | `string` | -- | Lamina API key (team-level). Required unless OAuth is configured. |
-| `baseUrl` | `string` | `https://app.uselamina.ai` | Lamina API base URL. |
-| `oauth` | `{ clientId, redirectUri?, storageKey? }` | -- | OAuth config for per-user authentication. |
-| `enableTool` | `boolean` | `true` | Register the Lamina Editor as a Studio tool. |
-| `enableDocumentAction` | `boolean` | `true` | Register the "Edit in Lamina" document action. |
-| `webhookUrl` | `string` | -- | Webhook URL for generation completion events (alternative to polling). |
+| `apiKey` | `string` | — | Lamina API key (team-level). Required unless `oauth` is configured. |
+| `baseUrl` | `string` | `https://app.uselamina.ai` | Lamina API base URL. Override for self-hosted instances. |
+| `oauth` | `LaminaOAuthConfig` | — | Per-editor OAuth instead of a shared API key. See [Advanced: per-editor authentication](#advanced-per-editor-authentication) below. |
+| `enableTool` | `boolean` | `true` | Register the "Lamina" tab in the Studio top nav. |
+| `enableDocumentAction` | `boolean` | `true` | Register "Edit in Lamina" + "Generate all media" document actions. |
+| `webhookUrl` | `string` | — | Webhook URL for generation completion events (alternative to polling). |
+| `presets` | `Record<string, LaminaPreset>` | — | Per-field-name generation hints (aspect ratio, modality, platform). |
 
-### OAuth Configuration
-
-For per-user authentication instead of (or alongside) a team API key:
-
-```ts
-laminaPlugin({
-  oauth: {
-    clientId: 'your-lamina-oauth-client-id',
-    redirectUri: 'https://your-studio.sanity.studio/lamina/callback', // optional
-  },
-})
-```
-
-Users without a team API key will see a "Sign in with Lamina" button.
-
-## How It Works
+## How it works
 
 ### Asset Source (Generate Dialog)
 
 1. Click "Generate with Lamina" in any image or file field
-2. Describe what you need in the brief field
-3. Optionally select a specific Lamina app or let auto-detect choose
-4. Click Generate -- the plugin calls `content.create()` and polls for completion
+2. Describe what you need in the brief field (auto-filled from schema context)
+3. Optionally pick a specific Lamina app or let auto-detect choose
+4. Click Generate — the plugin calls `content.create()` and polls until done
 5. Preview generated outputs and click "Use this" to save as a Sanity asset
 
-Generated assets are tagged with `source.name: 'lamina'` and include the run ID and URL for traceability.
+Saved assets are tagged with `source.name: 'lamina'` and include the run ID and URL for traceability.
 
 ### Studio Tool
 
-The Lamina tab in the top nav provides:
+The "Lamina" tab in the top nav provides:
 
-- **Editor tab** -- Embedded Lamina editor via iframe. Assets generated here are automatically saved to Sanity via postMessage bridge.
-- **Assets tab** -- Browse all Lamina-generated assets in your Sanity dataset with thumbnails, filenames, and links to the original Lamina run. Filter by type (images/videos), search by filename, and scroll to load more.
+- **Editor** — Embedded Lamina editor via iframe. Assets generated here are sent back into Sanity via a postMessage bridge.
+- **Assets browser** — All Lamina-generated assets in your dataset with thumbnails, filenames, and run links. Filter by type (images/videos), search by filename, scroll to load more.
 
-### Document Action
+### Document actions
 
-The "Edit in Lamina" action uses schema-aware discovery to find all image/file fields in a document (at any nesting depth), checks if their assets have Lamina source metadata, and opens the original run for editing.
+- **Edit in Lamina** — Detects Lamina-sourced assets on the current document (at any nesting depth) and opens the original run for editing.
+- **Generate all media** — Scans for empty image/file fields and runs schema-aware generations for each in parallel.
+
+## Advanced: per-editor authentication
+
+Use OAuth when you want each editor to authorise individually instead of sharing one workspace API key. Common reasons:
+
+- Per-editor audit trails on generation history
+- Revoke one editor's access without rotating the team key
+- Compliance teams that don't allow shared service credentials
+
+```ts
+laminaPlugin({
+  oauth: {
+    // clientId is optional — the plugin self-registers on first sign-in
+    // and caches the assigned client_id in localStorage. Set this only if
+    // you've been pre-provisioned a client_id by the Lamina ops team.
+    redirectUri: 'https://your-studio.sanity.studio/lamina/callback',
+  },
+})
+```
+
+What changes for editors:
+
+- A "Sign in with Lamina" button appears the first time they open the Studio.
+- Clicking it opens a popup → consent screen on Lamina → on approve, the popup closes and the plugin stores per-user tokens in `localStorage`.
+- The plugin silently refreshes tokens before they expire (every ~4 minutes the plugin checks; refresh kicks in 5 min before access-token expiry).
+- After 30 days of no activity, the user re-authorises.
+
+If you want both options available — fall back to OAuth when no API key is configured — pass both:
+
+```ts
+laminaPlugin({
+  apiKey: process.env.SANITY_STUDIO_LAMINA_API_KEY,
+  oauth: {},
+})
+```
+
+> **First-run registration:** On the first "Sign in with Lamina" click, the plugin POSTs to `/oauth/register` with the Studio's redirect URI. Lamina returns a fresh `client_id` which is cached locally. No manual coordination with the Lamina team needed.
 
 ## Development
 
@@ -99,15 +142,14 @@ npm run build     # tsc -> dist/
 npm run dev       # tsc --watch
 ```
 
-### Local Testing
+### Local testing against a Studio
 
 ```bash
 # In this repo:
-npm run dev
+npm run build
 
-# In a Sanity Studio project:
-# Add to package.json: "sanity-plugin-lamina": "file:../sanity-lamina"
-# Then add to sanity.config.ts as shown above
+# In a Sanity Studio project (e.g. lamina-cms):
+npm i ../sanity-plugin-lamina   # or `npm link` for live edits
 ```
 
 ## Architecture
@@ -115,21 +157,31 @@ npm run dev
 ```
 src/
   index.ts                          # Public exports
-  plugin.tsx                        # definePlugin -- registers all surfaces
-  types.ts                          # Plugin options, generation state types
+  plugin.tsx                        # definePlugin — registers all surfaces
+  types.ts                          # LaminaPluginOptions, LaminaOAuthConfig, GenerationState
   lib/
-    LaminaContext.tsx                # React context + OAuth login flow
-    oauth.ts                        # OAuth token management utilities
+    LaminaContext.tsx               # React context, OAuth login UI, refresh wiring
+    oauth.ts                        # Token storage, refresh, dynamic client registration
+    schemaContext.ts                # Schema-aware brief enrichment
+    briefEnhancer.ts                # /v1/content/brief integration
+    useTypeahead.ts                 # Debounced brief typeahead
+    aspectRatio.ts                  # Field-name → aspect-ratio detection
+    appRouting.ts                   # Per-field app preferences (localStorage)
+    recentBriefs.ts                 # Recent-briefs history (localStorage)
+    documentContext.ts              # Last-viewed-document store for postMessage
+    useLaminaAssets.ts              # GROQ helper to query Lamina-sourced assets
   components/
-    LaminaAssetSource.tsx           # Asset source definition
+    LaminaAssetSource.tsx           # AssetSource definition
     GenerateDialog.tsx              # Generation UI with app picker + multi-select
-    LaminaFieldAction.tsx           # Field-level "Edit in Lamina" button
+    LaminaFieldAction.tsx           # Field-level action button
+    AssetPickerGrid.tsx             # Filterable grid of past Lamina assets
   tool/
-    LaminaTool.tsx                  # Studio tool with editor + asset browser tabs
+    LaminaTool.tsx                  # Embedded Studio tool (iframe + postMessage)
   actions/
-    regenerateAction.tsx            # Schema-aware document action
+    regenerateAction.tsx            # "Edit in Lamina" document action
+    generateAllAction.tsx           # "Generate all media" bulk action
 ```
 
 ## License
 
-MIT -- see [LICENSE](./LICENSE).
+MIT — see [LICENSE](./LICENSE).

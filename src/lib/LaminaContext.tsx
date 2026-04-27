@@ -3,14 +3,21 @@ import { LaminaClient } from '@uselamina/sdk';
 import { Button, Card, Flex, Stack, Text, Spinner } from '@sanity/ui';
 import type { LaminaPluginOptions } from '../types.js';
 import {
-  clearToken,
   exchangeCode,
   getStoredToken,
+  refreshIfNeeded,
   startOAuthFlow,
   storeToken,
 } from './oauth.js';
 
 const LAMINA_ORIGIN = 'https://app.uselamina.ai';
+
+/**
+ * How often to re-check whether the OAuth access token needs a refresh.
+ * 4 min lines up well with the 5-min refresh buffer in `refreshIfNeeded`,
+ * so we always have one timer fire before the access token expires.
+ */
+const REFRESH_CHECK_INTERVAL_MS = 4 * 60 * 1000;
 
 interface LaminaContextValue {
   client: LaminaClient;
@@ -49,54 +56,70 @@ function OAuthLogin({
     setLoading(true);
     setError(null);
 
-    const popup = startOAuthFlow(options.oauth, baseUrl);
-
-    if (!popup) {
-      setError('Failed to open login popup. Please allow popups for this site.');
-      setLoading(false);
-      return;
-    }
-
-    // Listen for the callback
-    const handleMessage = async (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
-      if (!event.data?.type || event.data.type !== 'lamina:oauth-callback') return;
-
-      const code = event.data.code as string | undefined;
-      if (!code) {
-        setError('No authorization code received.');
+    // `startOAuthFlow` is async because it may dynamically register the OAuth
+    // client (POST /oauth/register) before opening the popup. Wrap the rest of
+    // the flow in an IIFE so the click handler stays sync.
+    void (async () => {
+      let popup: Window | null;
+      try {
+        popup = await startOAuthFlow(options.oauth!, baseUrl);
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : 'Failed to start login flow.',
+        );
         setLoading(false);
         return;
       }
 
-      try {
-        const tokens = await exchangeCode(options.oauth!, baseUrl, code);
-        storeToken(
-          options.oauth!,
-          tokens.accessToken,
-          tokens.refreshToken,
-          tokens.expiresIn,
-        );
-        onAuthenticated(tokens.accessToken);
-      } catch (err) {
+      if (!popup) {
         setError(
-          err instanceof Error ? err.message : 'Authentication failed.',
+          'Failed to open login popup. Please allow popups for this site.',
         );
-      } finally {
         setLoading(false);
+        return;
       }
-    };
 
-    window.addEventListener('message', handleMessage);
+      // Listen for the callback
+      const handleMessage = async (event: MessageEvent) => {
+        if (event.origin !== window.location.origin) return;
+        if (!event.data?.type || event.data.type !== 'lamina:oauth-callback') return;
 
-    // Also poll for popup close (user closed without completing)
-    const interval = setInterval(() => {
-      if (popup.closed) {
-        clearInterval(interval);
-        window.removeEventListener('message', handleMessage);
-        setLoading(false);
-      }
-    }, 500);
+        const code = event.data.code as string | undefined;
+        if (!code) {
+          setError('No authorization code received.');
+          setLoading(false);
+          return;
+        }
+
+        try {
+          const tokens = await exchangeCode(options.oauth!, baseUrl, code);
+          storeToken(
+            options.oauth!,
+            tokens.accessToken,
+            tokens.refreshToken,
+            tokens.expiresIn,
+          );
+          onAuthenticated(tokens.accessToken);
+        } catch (err) {
+          setError(
+            err instanceof Error ? err.message : 'Authentication failed.',
+          );
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      window.addEventListener('message', handleMessage);
+
+      // Also poll for popup close (user closed without completing)
+      const interval = setInterval(() => {
+        if (popup!.closed) {
+          clearInterval(interval);
+          window.removeEventListener('message', handleMessage);
+          setLoading(false);
+        }
+      }, 500);
+    })();
   }, [options, baseUrl, onAuthenticated]);
 
   return (
@@ -155,11 +178,44 @@ export function LaminaProvider({
 
   const [resolvedKey, setResolvedKey] = useState<string | null>(initialKey);
 
-  // Sync when options change
+  const baseUrl = options.baseUrl || LAMINA_ORIGIN;
+
+  // Sync when options change. For OAuth, also proactively refresh the access
+  // token if it's near expiry so the user stays logged in past the 1h access
+  // token TTL without a manual re-auth click. `refreshIfNeeded` returns:
+  //   - the existing token when it's still well within its TTL
+  //   - a freshly-rotated token when it succeeded a refresh
+  //   - null when the refresh token is missing or rejected (forces re-login)
+  //
+  // We also schedule a recurring check while OAuth is configured so mid-session
+  // expiries (long-running tabs) refresh silently before the access token dies.
+  // `refreshIfNeeded` no-ops cheaply when the token still has > 5 min of life.
   useEffect(() => {
-    const token = options.oauth ? getStoredToken(options.oauth) : null;
-    setResolvedKey(options.apiKey || token);
-  }, [options.apiKey, options.oauth]);
+    if (options.apiKey) {
+      setResolvedKey(options.apiKey);
+      return;
+    }
+    if (!options.oauth) {
+      setResolvedKey(null);
+      return;
+    }
+
+    let cancelled = false;
+    const oauthConfig = options.oauth;
+
+    const check = async () => {
+      const token = await refreshIfNeeded(oauthConfig, baseUrl);
+      if (!cancelled) setResolvedKey(token);
+    };
+
+    void check();
+    const intervalId = window.setInterval(check, REFRESH_CHECK_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [options.apiKey, options.oauth, baseUrl]);
 
   const handleAuthenticated = useCallback((token: string) => {
     setResolvedKey(token);

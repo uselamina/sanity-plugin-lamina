@@ -1,6 +1,6 @@
 {
   "name": "sanity-plugin-lamina",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Sanity Studio plugin for generating media assets with Lamina",
   "keywords": [
     "sanity",
@@ -42,7 +42,8 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@uselamina/sdk": "^0.1.0"
+    "@uselamina/sdk": "^0.1.0",
+    "react-is": "^19.2.5"
   },
   "devDependencies": {
     "@sanity/icons": "^3.5.0",
