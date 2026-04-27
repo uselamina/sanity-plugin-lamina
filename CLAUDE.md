@@ -1,33 +1,56 @@
 # sanity-plugin-lamina
 
-Sanity Studio plugin that lets content editors generate and manage media assets with Lamina directly inside Sanity Studio.
+Sanity plugin for generating and managing media assets with Lamina — Studio UI, headless API, CLI, and webhooks.
 
 **GitHub issue:** cirbuk/react-flow-integration#807
 
 ## What this plugin does
 
-Three Sanity Studio extension points:
-
+### Studio plugin (`sanity-plugin-lamina`)
 1. **Asset Source** — "Generate with Lamina" appears in every image/file field dropdown. User types a brief, Lamina generates media, user clicks "Use this" to save it as a Sanity asset.
 2. **Studio Tool** — "Lamina" tab in top Studio nav. Embeds the full Lamina editor via iframe. Outputs are saved back to Sanity via postMessage bridge.
-3. **Document Action** — "Edit in Lamina" appears in the document action bar. Detects Lamina-sourced assets (via `source.name === 'lamina'` metadata) and opens the original run for editing.
+3. **Document Actions** — "Edit in Lamina" and "Generate all media" in the document action bar.
+
+### Headless API (`sanity-plugin-lamina/headless`)
+Programmatic content generation — `createLaminaSanityClient()` wraps both SDKs into high-level operations: `generate()`, `generateForDocument()`, `fillEmptyMedia()`, `uploadToSanity()`, `scoreAssets()`, and the intelligence API.
+
+### Webhook handler (`sanity-plugin-lamina/webhooks`)
+`createLaminaWebhookHandler()` — auto-generates media on Sanity document events. Deploy as serverless function.
+
+### CLI (`npx sanity-lamina`)
+Terminal-based bulk generation, document filling, asset scoring, app listing, and credit checking.
 
 ## Architecture
 
 ```
 src/
-├── index.ts                          # Public exports
-├── plugin.tsx                        # definePlugin entry — registers all 3 surfaces
+├── index.ts                          # Studio plugin public exports (React)
+├── plugin.tsx                        # definePlugin entry — registers all Studio surfaces
 ├── types.ts                          # LaminaPluginOptions, GenerationState, GeneratedOutput
-├── lib/
-│   └── LaminaContext.tsx             # React context providing LaminaClient from @uselamina/sdk
+├── lib/                              # Shared pure-TS utilities (no React dep)
+│   ├── LaminaContext.tsx             # React context providing LaminaClient from @uselamina/sdk
+│   ├── briefEnhancer.ts             # Brief enhancement + silent enrichment
+│   ├── useTypeahead.ts              # Debounced typeahead hook (React)
+│   ├── schemaContext.ts             # Schema introspection for field meta + siblings
+│   ├── aspectRatio.ts               # Field-name-to-ratio detection
+│   ├── appRouting.ts                # App selection persistence
+│   └── recentBriefs.ts              # Brief history tracking
 ├── components/
 │   ├── LaminaAssetSource.tsx         # AssetSource definition { name, title, icon, component }
-│   └── GenerateDialog.tsx            # The generation UI: brief → generate → poll → preview → select
+│   └── GenerateDialog.tsx            # Generation UI with prompt intelligence
 ├── tool/
-│   └── LaminaTool.tsx               # Studio tool: iframe embed + postMessage bridge + save-to-Sanity
-└── actions/
-    └── regenerateAction.tsx          # Document action: finds Lamina assets, opens run URL
+│   └── LaminaTool.tsx               # Studio tool: iframe embed + postMessage bridge
+├── actions/
+│   ├── regenerateAction.tsx          # Document action: finds Lamina assets, opens run URL
+│   └── generateAllAction.tsx         # Bulk generation document action (3-phase workflow)
+├── headless/                         # Headless API (no React)
+│   ├── index.ts                      # Public exports
+│   ├── client.ts                     # createLaminaSanityClient factory + implementation
+│   └── types.ts                      # Headless-specific types
+├── webhooks/
+│   └── index.ts                      # createLaminaWebhookHandler factory
+└── cli/
+    └── index.ts                      # CLI entry point (bin: sanity-lamina)
 ```
 
 ## Key dependencies
