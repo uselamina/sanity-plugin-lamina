@@ -1,6 +1,7 @@
 import type { LaminaOAuthConfig } from '../types.js';
 
 const DEFAULT_STORAGE_KEY = 'lamina_oauth';
+const TOKEN_CHANGE_EVENT = 'lamina:oauth-token-change';
 
 interface OAuthTokens {
   accessToken: string;
@@ -30,6 +31,15 @@ function storageKey(config: LaminaOAuthConfig): string {
  */
 function clientIdStorageKey(config: LaminaOAuthConfig): string {
   return `${storageKey(config)}_client_id`;
+}
+
+function dispatchTokenChange(config: LaminaOAuthConfig): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(
+    new CustomEvent(TOKEN_CHANGE_EVENT, {
+      detail: { key: storageKey(config) },
+    }),
+  );
 }
 
 function getStoredClientId(config: LaminaOAuthConfig): string | null {
@@ -180,10 +190,12 @@ export function storeToken(
       : undefined,
   };
   localStorage.setItem(storageKey(config), JSON.stringify(tokens));
+  dispatchTokenChange(config);
 }
 
 export function clearToken(config: LaminaOAuthConfig): void {
   localStorage.removeItem(storageKey(config));
+  dispatchTokenChange(config);
 }
 
 /**
@@ -209,8 +221,17 @@ export function subscribeToTokenChanges(
     }
     onChange(getStoredToken(config));
   };
+  const sameTabHandler = (event: Event) => {
+    const detail = (event as CustomEvent<{ key?: string }>).detail;
+    if (detail?.key !== key) return;
+    onChange(getStoredToken(config));
+  };
   window.addEventListener('storage', handler);
-  return () => window.removeEventListener('storage', handler);
+  window.addEventListener(TOKEN_CHANGE_EVENT, sameTabHandler);
+  return () => {
+    window.removeEventListener('storage', handler);
+    window.removeEventListener(TOKEN_CHANGE_EVENT, sameTabHandler);
+  };
 }
 
 /**
