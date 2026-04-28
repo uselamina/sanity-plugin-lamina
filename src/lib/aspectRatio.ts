@@ -9,14 +9,18 @@
 /** Valid aspect ratio values accepted by the Lamina content.create() API. */
 export type LaminaAspectRatio = '1:1' | '16:9' | '9:16' | '4:3' | '4:5' | 'auto';
 
+// `value: ''` means: prefer the field-name heuristic (e.g. coverImage → 16:9);
+// if no heuristic matches, omit aspectRatio from the request and let the
+// server-side agent decide based on doc + brief context. We removed the
+// explicit `'auto'` option that always deferred to the server — having both
+// in the dropdown was confusing for users since they look identical.
 export const ASPECT_RATIO_OPTIONS: readonly { value: LaminaAspectRatio | ''; label: string }[] = [
-  { value: '', label: 'Auto-detect' },
+  { value: '', label: 'Auto' },
   { value: '1:1', label: '1:1 (Square)' },
   { value: '16:9', label: '16:9 (Landscape)' },
   { value: '9:16', label: '9:16 (Portrait)' },
   { value: '4:3', label: '4:3 (Classic)' },
   { value: '4:5', label: '4:5 (Vertical)' },
-  { value: 'auto', label: 'Auto (let Lamina decide)' },
 ] as const;
 
 /**

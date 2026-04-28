@@ -49,6 +49,40 @@ function storeClientId(config: LaminaOAuthConfig, clientId: string): void {
 }
 
 /**
+ * Default OAuth redirect target. Must point at the Lamina-hosted callback
+ * page (which postMessages the auth code back to the Studio opener and
+ * self-closes) — NOT at the Studio's own origin, which has no such page.
+ */
+function defaultRedirectUri(baseUrl: string): string {
+  return `${baseUrl}/oauth/callback`;
+}
+
+/** sessionStorage key for the in-flight PKCE code_verifier. */
+function verifierStorageKey(config: LaminaOAuthConfig): string {
+  return `${storageKey(config)}_verifier`;
+}
+
+// ─── PKCE (RFC 7636) ────────────────────────────────────────────────────────
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function generateCodeVerifier(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return base64UrlEncode(bytes);
+}
+
+async function deriveCodeChallenge(verifier: string): Promise<string> {
+  const data = new TextEncoder().encode(verifier);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return base64UrlEncode(new Uint8Array(hash));
+}
+
+/**
  * Returns the OAuth client_id, resolving in this order:
  *   1. `config.clientId` if explicitly provided in plugin config
  *   2. Cached client_id from localStorage (set by a previous registration)
@@ -67,8 +101,7 @@ async function resolveClientId(
   const cached = getStoredClientId(config);
   if (cached) return cached;
 
-  const redirectUri =
-    config.redirectUri || `${window.location.origin}/lamina/callback`;
+  const redirectUri = config.redirectUri || defaultRedirectUri(baseUrl);
   const clientName = `Sanity Studio (${window.location.hostname})`;
 
   const response = await fetch(`${baseUrl}/oauth/register`, {
@@ -154,33 +187,71 @@ export function clearToken(config: LaminaOAuthConfig): void {
 }
 
 /**
- * Builds the OAuth authorization URL and opens it in a popup.
- * The popup will redirect back to `redirectUri` with a `code` parameter.
+ * Subscribes to token changes coming from OTHER tabs (browser fires `storage`
+ * events on every tab EXCEPT the one that wrote the change).
  *
- * If `config.clientId` is not provided, this resolves it dynamically via
- * `/oauth/register` (cached in localStorage on first call). That makes the
- * function async — callers must `await` it.
+ * Lets a Studio tab pick up a fresh token a sibling tab just refreshed,
+ * instead of trying to refresh again with the now-rotated refresh token —
+ * which would 400 with `invalid_grant` and force a confusing re-login.
+ *
+ * Returns an unsubscribe function for cleanup.
  */
-export async function startOAuthFlow(
+export function subscribeToTokenChanges(
+  config: LaminaOAuthConfig,
+  onChange: (token: string | null) => void,
+): () => void {
+  const key = storageKey(config);
+  const handler = (event: StorageEvent) => {
+    if (event.key !== key) return;
+    if (event.newValue === null) {
+      onChange(null);
+      return;
+    }
+    onChange(getStoredToken(config));
+  };
+  window.addEventListener('storage', handler);
+  return () => window.removeEventListener('storage', handler);
+}
+
+/**
+ * Resolves the OAuth client_id (registering dynamically if needed), generates
+ * a PKCE pair, stashes the verifier in sessionStorage, and returns the
+ * authorize URL.
+ *
+ * Does NOT open the popup — that's the caller's job, and they must do it
+ * synchronously inside the user-gesture event (a click) BEFORE awaiting this
+ * function. Otherwise Safari/Firefox/Chrome will classify the popup as
+ * non-user-initiated and block it. Recommended pattern:
+ *
+ *   const popup = window.open('about:blank', 'lamina-oauth', features); // sync
+ *   const url = await prepareOAuthFlow(config, baseUrl);                // async
+ *   popup.location.href = url;                                          // navigate
+ */
+export async function prepareOAuthFlow(
   config: LaminaOAuthConfig,
   baseUrl: string,
-): Promise<Window | null> {
+): Promise<string> {
   const clientId = await resolveClientId(config, baseUrl);
-  const redirectUri =
-    config.redirectUri || `${window.location.origin}/lamina/callback`;
+  const redirectUri = config.redirectUri || defaultRedirectUri(baseUrl);
+
+  // Generate a PKCE pair, stash the verifier in sessionStorage so
+  // `exchangeCode` can read it back when the popup returns.
+  const verifier = generateCodeVerifier();
+  const challenge = await deriveCodeChallenge(verifier);
+  sessionStorage.setItem(verifierStorageKey(config), verifier);
+
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
-    scope: 'api',
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    // Space-separated per RFC 6749 §3.3. Must match the values in
+    // server/services/mcpOAuthService.ts MCP_OAUTH_SCOPES — anything else
+    // gets rejected by validateScopes() as "Unsupported MCP OAuth scope".
+    scope: 'lamina:creative:read lamina:creative:write lamina:brand:read',
   });
-  const authUrl = `${baseUrl}/oauth/authorize?${params.toString()}`;
-
-  return window.open(
-    authUrl,
-    'lamina-oauth',
-    'width=600,height=700,popup=yes',
-  );
+  return `${baseUrl}/oauth/authorize?${params.toString()}`;
 }
 
 /**
@@ -199,8 +270,15 @@ export async function exchangeCode(
     throw new Error('OAuth client_id missing — login flow not initialised');
   }
 
-  const redirectUri =
-    config.redirectUri || `${window.location.origin}/lamina/callback`;
+  const redirectUri = config.redirectUri || defaultRedirectUri(baseUrl);
+
+  // Pull and consume the PKCE verifier stashed by `startOAuthFlow`. If it's
+  // gone, the user likely refreshed the Studio mid-flow — restart sign-in.
+  const verifier = sessionStorage.getItem(verifierStorageKey(config));
+  if (!verifier) {
+    throw new Error('Missing PKCE verifier — please start the sign-in flow again.');
+  }
+  sessionStorage.removeItem(verifierStorageKey(config));
 
   const response = await fetch(`${baseUrl}/oauth/token`, {
     method: 'POST',
@@ -210,6 +288,7 @@ export async function exchangeCode(
       client_id: clientId,
       redirect_uri: redirectUri,
       code,
+      code_verifier: verifier,
     }),
   });
 
@@ -278,7 +357,19 @@ export function refreshIfNeeded(
         storeToken(config, fresh.accessToken, fresh.refreshToken, fresh.expiresIn);
         return fresh.accessToken;
       } catch {
-        // Refresh token rejected (revoked, expired, network error)
+        // Refresh failed. Common cause: another Studio tab refreshed first
+        // and rotated our refresh token. Re-read storage before clearing —
+        // if the sibling tab landed a fresh token, use it instead of forcing
+        // the user to re-authenticate.
+        const recheck = getStoredTokens(config);
+        if (
+          recheck &&
+          recheck.expiresAt !== null &&
+          recheck.expiresAt - Date.now() > REFRESH_BUFFER_MS &&
+          recheck.accessToken !== stored.accessToken
+        ) {
+          return recheck.accessToken;
+        }
         clearToken(config);
         return null;
       }

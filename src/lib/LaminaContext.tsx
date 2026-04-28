@@ -5,9 +5,10 @@ import type { LaminaPluginOptions } from '../types.js';
 import {
   exchangeCode,
   getStoredToken,
+  prepareOAuthFlow,
   refreshIfNeeded,
-  startOAuthFlow,
   storeToken,
+  subscribeToTokenChanges,
 } from './oauth.js';
 
 const LAMINA_ORIGIN = 'https://app.uselamina.ai';
@@ -56,14 +57,29 @@ function OAuthLogin({
     setLoading(true);
     setError(null);
 
-    // `startOAuthFlow` is async because it may dynamically register the OAuth
-    // client (POST /oauth/register) before opening the popup. Wrap the rest of
-    // the flow in an IIFE so the click handler stays sync.
+    // Open the popup synchronously inside the click handler so the browser
+    // counts it as a user gesture. If we awaited DCR or PKCE work first, the
+    // window.open after that await would be classified as non-user-initiated
+    // and silently blocked by Safari/Firefox/Chrome. We open `about:blank`
+    // first and navigate it once the auth URL is ready.
+    const popup = window.open(
+      'about:blank',
+      'lamina-oauth',
+      'width=600,height=700,popup=yes',
+    );
+
+    if (!popup) {
+      setError('Failed to open login popup. Please allow popups for this site.');
+      setLoading(false);
+      return;
+    }
+
     void (async () => {
-      let popup: Window | null;
+      let url: string;
       try {
-        popup = await startOAuthFlow(options.oauth!, baseUrl);
+        url = await prepareOAuthFlow(options.oauth!, baseUrl);
       } catch (err) {
+        popup.close();
         setError(
           err instanceof Error ? err.message : 'Failed to start login flow.',
         );
@@ -71,17 +87,13 @@ function OAuthLogin({
         return;
       }
 
-      if (!popup) {
-        setError(
-          'Failed to open login popup. Please allow popups for this site.',
-        );
-        setLoading(false);
-        return;
-      }
+      popup.location.href = url;
 
-      // Listen for the callback
+      // Listen for the callback. The OAuth callback page is hosted on the
+      // Lamina backend (baseUrl), so messages originate from THERE, not from
+      // the Studio's own origin.
       const handleMessage = async (event: MessageEvent) => {
-        if (event.origin !== window.location.origin) return;
+        if (event.origin !== baseUrl) return;
         if (!event.data?.type || event.data.type !== 'lamina:oauth-callback') return;
 
         const code = event.data.code as string | undefined;
@@ -113,7 +125,7 @@ function OAuthLogin({
 
       // Also poll for popup close (user closed without completing)
       const interval = setInterval(() => {
-        if (popup!.closed) {
+        if (popup.closed) {
           clearInterval(interval);
           window.removeEventListener('message', handleMessage);
           setLoading(false);
@@ -211,9 +223,18 @@ export function LaminaProvider({
     void check();
     const intervalId = window.setInterval(check, REFRESH_CHECK_INTERVAL_MS);
 
+    // Cross-tab sync: when a sibling Studio tab refreshes or clears the
+    // token, mirror that into this tab's state. Without this, tabs race
+    // each other on refresh and the loser sees `invalid_grant` because the
+    // refresh token has been rotated.
+    const unsubscribe = subscribeToTokenChanges(oauthConfig, (token) => {
+      if (!cancelled) setResolvedKey(token);
+    });
+
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
+      unsubscribe();
     };
   }, [options.apiKey, options.oauth, baseUrl]);
 

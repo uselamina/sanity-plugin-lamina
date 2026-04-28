@@ -29,10 +29,7 @@ npm install sanity-plugin-lamina
 ## Quick start (API key — recommended)
 
 1. Sign up at [app.uselamina.ai](https://app.uselamina.ai) (or log in to an existing workspace).
-2. **Workspace settings → API Keys → Create API Key.** Pick these scopes:
-   - `runs:read` `runs:write`
-   - `content:create`
-   - `assets:write`
+2. **Workspace settings → API Keys → Create API Key.** Leave the scope at the default (`workflow`) — it's the right one for the plugin.
 3. Copy the `lma_…` value.
 4. In your Sanity Studio:
 
@@ -107,14 +104,16 @@ Use OAuth when you want each editor to authorise individually instead of sharing
 
 ```ts
 laminaPlugin({
-  oauth: {
-    // clientId is optional — the plugin self-registers on first sign-in
-    // and caches the assigned client_id in localStorage. Set this only if
-    // you've been pre-provisioned a client_id by the Lamina ops team.
-    redirectUri: 'https://your-studio.sanity.studio/lamina/callback',
-  },
+  oauth: {},
 })
 ```
+
+That's it — every field on `oauth` is optional. `clientId` is filled in by the plugin self-registering with Lamina on first sign-in (cached in localStorage). `redirectUri` defaults to `https://app.uselamina.ai/oauth/callback`, which is the page that posts the auth code back to your Studio popup.
+
+You only need to set anything inside `oauth: { ... }` in two niche cases:
+
+- `clientId` — if the Lamina ops team has pre-provisioned a client_id for you (compliance / audit-trail reasons).
+- `redirectUri` — only if you self-host the Lamina backend at a different domain. Don't point this at your Studio's own origin — there's no callback page there, and the popup would have nowhere to land.
 
 What changes for editors:
 

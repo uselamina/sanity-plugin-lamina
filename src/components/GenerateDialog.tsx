@@ -41,29 +41,17 @@ import type {
   ContentConcept,
   ExecutionOutput,
   ExecutionStatus,
-  LaminaCreateParams,
   MissingInput,
 } from '@uselamina/sdk';
 import { LaminaAuthError, LaminaRateLimitError } from '@uselamina/sdk';
 
-// --- Extensions for new API fields from Lamina PR #821 ---
-// These augment the SDK types until the SDK is updated.
+// SDK 0.2.0 has native `progress`, `inputSummary`, `modality`, `icon` fields on
+// AppSummary / ExecutionStatus, so we no longer need extension interfaces for
+// those. The one remaining augmentation: `credits.manageUrl` on CostEstimate
+// hasn't shipped to the SDK yet.
 
-/** ExecutionStatus extended with granular progress from the API. */
-interface ExecutionStatusWithProgress extends ExecutionStatus {
-  progress?: { percentComplete?: number };
-}
-
-/** CostEstimate extended with credit management URL. */
 interface CostEstimateWithManageUrl extends CostEstimate {
   credits?: { manageUrl?: string };
-}
-
-/** AppSummary extended with richer metadata. */
-interface AppSummaryEnriched extends SdkAppSummary {
-  icon?: string | null;
-  modality?: string | null;
-  inputSummary?: string | null;
 }
 import { useLamina } from '../lib/LaminaContext.js';
 import { getRoutedAppId, saveRoutedAppId } from '../lib/appRouting.js';
@@ -71,7 +59,6 @@ import { getRecentBriefs, saveRecentBrief } from '../lib/recentBriefs.js';
 import { detectAspectRatio, ASPECT_RATIO_OPTIONS } from '../lib/aspectRatio.js';
 import type { LaminaAspectRatio } from '../lib/aspectRatio.js';
 import type { GeneratedOutput, GenerationState } from '../types.js';
-import { enhanceBrief } from '../lib/briefEnhancer.js';
 import type { EnhanceResult } from '../lib/briefEnhancer.js';
 import { useTypeahead } from '../lib/useTypeahead.js';
 import { getFieldMeta, extractSiblingContext, buildSchemaAwarePrompt } from '../lib/schemaContext.js';
@@ -218,10 +205,9 @@ function toGeneratedOutput(out: ExecutionOutput): GeneratedOutput | null {
 }
 
 function progressFromStatus(status: ExecutionStatus): number | null {
-  // Use real percentComplete from the API when available (Lamina PR #821)
-  const enriched = status as ExecutionStatusWithProgress;
-  if (typeof enriched.progress?.percentComplete === 'number') {
-    return Math.round(enriched.progress.percentComplete);
+  // SDK 0.2.0 provides native progress.percentComplete (number | null).
+  if (typeof status.progress?.percentComplete === 'number') {
+    return Math.round(status.progress.percentComplete);
   }
   // Fallback for older API responses without granular progress
   switch (status.status) {
@@ -584,6 +570,10 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const documentTitle = useFormValue(['title']) as string | undefined
     || useFormValue(['name']) as string | undefined;
   const documentType = useFormValue(['_type']) as string | undefined;
+  // Full Sanity document JSON. Passed to /v1/content/auto-generate so the
+  // server-side agent can choose the right app and draft inputs from full
+  // doc context (title, body, asset URLs already on the doc, etc.).
+  const fullDocument = useFormValue([]) as Record<string, unknown> | undefined;
 
   // Read common body fields to enrich AI brief suggestions (#51)
   const rawBody = useFormValue(['body']) as unknown;
@@ -615,8 +605,13 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const activePreset = presetMatch?.[1] ?? null;
 
   const [dialogTab, setDialogTab] = useState<'generate' | 'library'>('generate');
-  const [brief, setBrief] = useState('');
-  const [briefPreFilled, setBriefPreFilled] = useState(false);
+  // Auto-fill the brief from document context on mount. Lazy initializer
+  // means this runs exactly once — clearing the textarea won't snap the
+  // suggestion back, since the state has already been seeded.
+  const [brief, setBrief] = useState(() => suggestedBrief || '');
+  // True while the textarea still shows the auto-suggestion (drives the
+  // "Suggested from document context" label). Cleared when the user edits.
+  const [briefPreFilled, setBriefPreFilled] = useState(() => Boolean(suggestedBrief));
   const [modality, setModality] = useState(activePreset?.modality ?? '');
 
   // -- Aspect ratio auto-detection --
@@ -638,13 +633,6 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     return () => window.removeEventListener('lamina:regenerate', handler);
   }, []);
 
-  // Pre-fill brief on first render if we have context
-  useEffect(() => {
-    if (!briefPreFilled && suggestedBrief && !brief) {
-      setBrief(suggestedBrief);
-      setBriefPreFilled(true);
-    }
-  }, [suggestedBrief, briefPreFilled, brief]);
   const [state, setState] = useState<GenerationState>({
     status: 'idle',
     runId: null,
@@ -698,7 +686,6 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const [enhanceResult, setEnhanceResult] = useState<EnhanceResult | null>(null);
   const [enhanceLoading, setEnhanceLoading] = useState(false);
   /** Tracks whether the current brief came from an AI suggestion (already optimized). */
-  const [briefFromAi, setBriefFromAi] = useState(false);
 
   // -- Schema-aware context (#67) --
   const sanitySchema = useSchema();
@@ -728,9 +715,6 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     (state.status === 'idle' || state.status === 'failed') && brief.length >= 8,
   );
 
-  // Batch generation state
-  const [batchMode, setBatchMode] = useState(false);
-  const [batchCount, setBatchCount] = useState(2);
 
   // Auto-set app from preset on mount
   useEffect(() => {
@@ -739,40 +723,43 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     }
   }, [activePreset?.appId, selectedAppId]);
 
-  // Fetch AI brief suggestions from /v1/content/brief
-  useEffect(() => {
-    const cacheKey = `${documentType}:${fieldName}:${selectedBrandId}`;
-    if (aiSuggestionsCacheKey.current === cacheKey) return;
-    aiSuggestionsCacheKey.current = cacheKey;
-
-    let cancelled = false;
-    (async () => {
-      setAiSuggestionsLoading(true);
-      try {
-        const resolvedModality = modality || (assetType === 'file' ? 'video' : 'image');
-        const goalParts = [
-          `${fieldName ? FIELD_LABELS[fieldName] || fieldName : 'media'} for ${documentType || 'content'}`,
-          ...(documentTitle ? [`: ${documentTitle}`] : []),
-          ...(documentExcerpt ? [` — ${documentExcerpt}`] : []),
-        ];
-        const briefParams: ContentBriefParams = {
-          goal: goalParts.join(''),
-          modality: resolvedModality,
-          count: 3,
-          ...(selectedBrandId ? { brandProfileId: selectedBrandId } : {}),
-        };
-        const result = await client.content.brief(briefParams);
-        if (cancelled) return;
-        setAiSuggestions(result.data?.concepts ?? []);
-      } catch {
-        // AI suggestions are best-effort; fall back to static suggestions
-        if (!cancelled) setAiSuggestions([]);
-      } finally {
-        if (!cancelled) setAiSuggestionsLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [client, documentType, documentTitle, fieldName, modality, assetType, selectedBrandId]);
+  // DISABLED — Fetch AI brief suggestions from /v1/content/brief on mount.
+  // The chip UI that consumed `aiSuggestions` was removed, and the backend's
+  // /v1/content/brief is currently broken (server's LLM client throws
+  // "model.generateContent is not a function"). Re-enable once both the UI
+  // and the backend endpoint are sorted.
+  // useEffect(() => {
+  //   const cacheKey = `${documentType}:${fieldName}:${selectedBrandId}`;
+  //   if (aiSuggestionsCacheKey.current === cacheKey) return;
+  //   aiSuggestionsCacheKey.current = cacheKey;
+  //
+  //   let cancelled = false;
+  //   (async () => {
+  //     setAiSuggestionsLoading(true);
+  //     try {
+  //       const resolvedModality = modality || (assetType === 'file' ? 'video' : 'image');
+  //       const goalParts = [
+  //         `${fieldName ? FIELD_LABELS[fieldName] || fieldName : 'media'} for ${documentType || 'content'}`,
+  //         ...(documentTitle ? [`: ${documentTitle}`] : []),
+  //         ...(documentExcerpt ? [` — ${documentExcerpt}`] : []),
+  //       ];
+  //       const briefParams: ContentBriefParams = {
+  //         goal: goalParts.join(''),
+  //         modality: resolvedModality,
+  //         count: 3,
+  //         ...(selectedBrandId ? { brandProfileId: selectedBrandId } : {}),
+  //       };
+  //       const result = await client.content.brief(briefParams);
+  //       if (cancelled) return;
+  //       setAiSuggestions(result.data?.concepts ?? []);
+  //     } catch {
+  //       if (!cancelled) setAiSuggestions([]);
+  //     } finally {
+  //       if (!cancelled) setAiSuggestionsLoading(false);
+  //     }
+  //   })();
+  //   return () => { cancelled = true; };
+  // }, [client, documentType, documentTitle, fieldName, modality, assetType, selectedBrandId]);
 
   // Library picker state
   const [libraryFilter, setLibraryFilter] = useState<AssetTypeFilter>(
@@ -841,18 +828,17 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     if (!appPicker.expanded && appPicker.apps.length === 0) {
       try {
         const result = await client.apps.list();
-        const apps: AppEntry[] = (result.data ?? []).map((a) => {
-          const enriched = a as AppSummaryEnriched;
-          return {
-            appId: a.appId,
-            name: a.name,
-            description: a.description,
-            capabilities: a.capabilities,
-            icon: enriched.icon ?? null,
-            modality: enriched.modality ?? null,
-            inputSummary: enriched.inputSummary ?? null,
-          };
-        });
+        const apps: AppEntry[] = (result.data ?? []).map((a) => ({
+          appId: a.appId,
+          name: a.name,
+          description: a.description,
+          capabilities: a.capabilities,
+          icon: a.icon ?? null,
+          modality: a.modality ?? null,
+          // SDK 0.2.0 returns inputSummary as a structured object {required, optional, total}.
+          // Plugin renders this as a one-line muted hint, so collapse to a count string.
+          inputSummary: a.inputSummary ? `${a.inputSummary.total} input${a.inputSummary.total === 1 ? '' : 's'}` : null,
+        }));
         setAppPicker((prev) => ({ ...prev, loading: false, apps, mode: 'list', error: null }));
       } catch (err) {
         setAppPicker((prev) => ({
@@ -870,18 +856,17 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     try {
       const result = await client.apps.discover({ intent: brief.trim() });
       const matches = result.data?.matches ?? [];
-      const apps: AppEntry[] = matches.map((a) => {
-        const enriched = a as typeof a & { icon?: string | null; modality?: string | null; inputSummary?: string | null };
-        return {
-          appId: a.appId,
-          name: a.name,
-          description: a.description,
-          capabilities: a.capabilities,
-          icon: enriched.icon ?? null,
-          modality: enriched.modality ?? null,
-          inputSummary: enriched.inputSummary ?? null,
-        };
-      });
+      // DiscoveredApp doesn't carry icon/modality/inputSummary — those live on
+      // the full AppSummary returned by /apps. Default to null for the picker.
+      const apps: AppEntry[] = matches.map((a) => ({
+        appId: a.appId,
+        name: a.name,
+        description: a.description,
+        capabilities: a.capabilities,
+        icon: null,
+        modality: null,
+        inputSummary: null,
+      }));
       setAppPicker((prev) => ({ ...prev, loading: false, apps, mode: 'discover', error: null }));
     } catch (err) {
       setAppPicker((prev) => ({
@@ -1053,141 +1038,41 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       const resolvedModality =
         modality || (assetType === 'file' ? 'video' : 'image');
 
-      // -- Enhance brief before generation (#66) --
-      let finalBrief = brief.trim();
-      if (enhanceEnabled && !briefFromAi) {
-        setEnhanceLoading(true);
-        const result = await enhanceBrief(client, finalBrief, {
-          modality: resolvedModality,
-          brandProfileId: selectedBrandId || undefined,
-          documentType,
-          documentTitle: documentTitle ?? undefined,
-          fieldName,
-          documentExcerpt: documentExcerpt ?? undefined,
-        });
-        setEnhanceLoading(false);
-        if (abort.signal.aborted) return;
-        if (result) {
-          setEnhanceResult(result);
-          finalBrief = result.enhanced;
-        }
-      }
-
-      // Silent enrichment — context from the document, not visible in UI
-      const metadata: Record<string, string> = {
-        ...(documentType ? { documentType } : {}),
-        ...(documentTitle ? { documentTitle } : {}),
+      // -- Single call: server-side content-router agent ---------------------
+      // Send the full Sanity document + brief + UI constraints. The server
+      // agent picks the right app, drafts every input from doc context, and
+      // either starts a run (status: 'started', returns runId) or returns a
+      // ranked candidate list when it can't auto-fill (status: 'needs_choice').
+      const autoGenResult = await client.content.autoGenerate({
+        brief: brief.trim(),
+        document: fullDocument ?? {},
         ...(fieldName ? { fieldName } : {}),
-        ...(fieldDescription ? { fieldPurpose: fieldDescription } : {}),
-        ...(documentExcerpt ? { documentExcerpt } : {}),
-        // Schema-aware enrichment (#67)
-        ...(fieldMeta?.description ? { fieldSchemaDescription: fieldMeta.description } : {}),
-        ...(siblingValues.length > 0
-          ? { documentContext: siblingValues.map((s) => `${s.fieldName}: ${s.value}`).join('; ') }
-          : {}),
-      };
-
-      const createParams: LaminaCreateParams & { aspectRatio?: string; metadata?: Record<string, string> } = {
-        brief: finalBrief,
-        modality: resolvedModality,
-        ...(activePreset?.aspectRatio ? { aspectRatio: activePreset.aspectRatio } : {}),
-        ...(activePreset?.platform ? { platform: activePreset.platform } : {}),
+        ...(fieldDescription ? { fieldDescription } : {}),
+        constraints: {
+          modality: resolvedModality as 'image' | 'video' | 'audio' | 'text',
+          ...(effectiveAspectRatio ? { aspectRatio: effectiveAspectRatio } : {}),
+        },
         ...(selectedAppId ? { appId: selectedAppId } : {}),
-        ...(selectedBrandId ? { brandProfileId: selectedBrandId } : {}),
-        ...(selectedCampaignId ? { campaignId: selectedCampaignId } : {}),
         ...(options.webhookUrl ? { webhookUrl: options.webhookUrl } : {}),
-        ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
-        ...(effectiveAspectRatio ? { aspectRatio: effectiveAspectRatio } : {}),
-      };
-
-      // Batch mode: run multiple content.create() calls in parallel for variants
-      if (batchMode && batchCount > 1) {
-        const createPromises = Array.from({ length: batchCount }, () =>
-          client.content.create(createParams),
-        );
-        const createResults = await Promise.allSettled(createPromises);
-        if (abort.signal.aborted) return;
-
-        const runIds = createResults
-          .filter(
-            (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof client.content.create>>> =>
-              r.status === 'fulfilled' && r.value.data.runId != null,
-          )
-          .map((r) => r.value.data.runId!);
-
-        if (runIds.length === 0) {
-          setState((prev) => ({
-            ...prev,
-            status: 'failed',
-            error: 'All batch runs failed to start.',
-            progress: null,
-          }));
-          return;
-        }
-
-        const allOutputs: GeneratedOutput[] = [];
-        for (const runId of runIds) {
-          const result = await client.runs.wait(runId, {
-            intervalMs: 3000,
-            timeoutMs: GENERATION_TIMEOUT_MS,
-            onPoll(status) {
-              if (abort.signal.aborted) return;
-              setState((prev) => ({
-                ...prev,
-                progress: progressFromStatus(status),
-              }));
-            },
-          });
-          if (abort.signal.aborted) return;
-          if (result.data.status === 'completed') {
-            const outputs = result.data.outputs
-              .map(toGeneratedOutput)
-              .filter((o): o is GeneratedOutput => o !== null);
-            allOutputs.push(...outputs);
-          }
-        }
-
-        setState({
-          status: 'completed',
-          runId: runIds[0] ?? null,
-          outputs: allOutputs,
-          error: allOutputs.length === 0 ? 'All batch runs failed.' : null,
-          progress: 100,
-        });
-        return;
-      }
-
-      const createResult = await client.content.create(createParams);
+      });
 
       if (abort.signal.aborted) return;
 
-      const runId = createResult.data.runId;
-      if (!runId) {
-        const needsInput = createResult.data.needsInput;
-        if (needsInput) {
-          setNeedsInputCtx({
-            message: needsInput.message,
-            missing: needsInput.missing ?? [],
-            appId: createResult.data.selectedApp?.appId,
-            workflowId: createResult.data.workflowId,
-          });
-          setCollectedInputs({});
-          setState((prev) => ({
-            ...prev,
-            status: 'needs-input',
-            error: null,
-            progress: null,
-          }));
-        } else {
-          setState((prev) => ({
-            ...prev,
-            status: 'failed',
-            error: 'No run was started. Try a more specific brief.',
-          }));
-        }
+      const data = autoGenResult.data;
+      // Agent couldn't auto-pick. Surface the reason so the user can pick an
+      // app via the existing app picker and click Generate again (which pins
+      // the appId and forces strict-validated drafting on that single app).
+      if (data.status === 'needs_choice') {
+        setState((prev) => ({
+          ...prev,
+          status: 'failed',
+          error: data.reason || 'Could not auto-pick an app. Pick one manually below.',
+          progress: null,
+        }));
         return;
       }
 
+      const runId = data.runId;
       setState((prev) => ({ ...prev, runId }));
 
       const result = await client.runs.wait(runId, {
@@ -1246,7 +1131,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         progress: null,
       }));
     }
-  }, [brief, modality, assetType, selectedAppId, selectedBrandId, selectedCampaignId, batchMode, batchCount, options.webhookUrl, effectiveAspectRatio, activePreset, client, documentType, documentTitle, fieldName, fieldDescription, documentExcerpt, enhanceEnabled, briefFromAi, fieldMeta, siblingValues]);
+  }, [brief, modality, assetType, selectedAppId, options.webhookUrl, effectiveAspectRatio, client, fieldName, fieldDescription, fullDocument]);
 
   // Proxy a CDN URL through transferAsset to avoid CORS issues
   const resolveAssetUrl = useCallback(
@@ -1549,84 +1434,10 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           {/* Brief input */}
           <Stack space={2}>
             <Label size={1}>Describe what you need</Label>
-            {!brief && isIdle && recentBriefs.length > 0 ? (
-              <Stack space={1}>
-                <Text size={0} muted weight="medium">Recently used</Text>
-                <Inline space={1}>
-                  {recentBriefs.map((r) => (
-                    <Button
-                      key={r.brief}
-                      text={r.brief.length > 40 ? `${r.brief.substring(0, 40)}...` : r.brief}
-                      mode="ghost"
-                      fontSize={0}
-                      padding={2}
-                      tone="primary"
-                      onClick={() => setBrief(r.brief)}
-                    />
-                  ))}
-                </Inline>
-              </Stack>
-            ) : null}
-            {!brief && isIdle ? (
-              <Stack space={2}>
-                {/* Schema-aware suggestion (#67) */}
-                {schemaAwarePrompt ? (
-                  <Stack space={1}>
-                    <Text size={0} muted weight="medium">From your schema</Text>
-                    <Button
-                      text={schemaAwarePrompt.length > 60 ? `${schemaAwarePrompt.substring(0, 60)}...` : schemaAwarePrompt}
-                      title={schemaAwarePrompt}
-                      mode="ghost"
-                      fontSize={0}
-                      padding={2}
-                      tone="positive"
-                      onClick={() => setBrief(schemaAwarePrompt)}
-                    />
-                  </Stack>
-                ) : null}
-                {aiSuggestionsLoading ? (
-                  <Flex align="center" gap={2}>
-                    <Spinner />
-                    <Text size={0} muted>Getting suggestions...</Text>
-                  </Flex>
-                ) : aiSuggestions.length > 0 ? (
-                  <Stack space={1}>
-                    <Text size={0} muted weight="medium">Suggested for this context</Text>
-                    <Inline space={1}>
-                      {aiSuggestions.map((c) => (
-                        <Button
-                          key={c.title}
-                          text={c.prompt.length > 50 ? `${c.prompt.substring(0, 50)}...` : c.prompt}
-                          title={`${c.title}: ${c.rationale}`}
-                          mode="ghost"
-                          fontSize={0}
-                          padding={2}
-                          tone="primary"
-                          onClick={() => { setBrief(c.prompt); setBriefFromAi(true); }}
-                        />
-                      ))}
-                    </Inline>
-                  </Stack>
-                ) : null}
-                <Inline space={1}>
-                  {suggestions.map((s) => (
-                    <Button
-                      key={s}
-                      text={s}
-                      mode="ghost"
-                      fontSize={0}
-                      padding={2}
-                      onClick={() => setBrief(s)}
-                    />
-                  ))}
-                </Inline>
-              </Stack>
-            ) : null}
             <TextArea
               value={brief}
               onChange={(e) => {
                 setBrief(e.currentTarget.value);
-                setBriefFromAi(false);
                 if (briefPreFilled) setBriefPreFilled(false);
               }}
               placeholder="Product photo of white sneakers on marble surface, lifestyle aesthetic"
@@ -1650,7 +1461,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                       fontSize={0}
                       padding={2}
                       tone="primary"
-                      onClick={() => { setBrief(c.prompt); setBriefFromAi(true); typeahead.clear(); }}
+                      onClick={() => { setBrief(c.prompt); typeahead.clear(); }}
                     />
                   ))}
                 </Inline>
@@ -1783,35 +1594,6 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                 ))}
               </Select>
             </Stack>
-          ) : null}
-
-          {/* Batch mode toggle */}
-          {isIdle ? (
-            <Flex align="center" gap={3}>
-              <Button
-                text={batchMode ? 'Single output' : 'Generate variants'}
-                mode="ghost"
-                fontSize={1}
-                onClick={() => setBatchMode((v) => !v)}
-              />
-              {batchMode ? (
-                <Flex align="center" gap={2}>
-                  <Label size={1}>Count:</Label>
-                  <Select
-                    value={String(batchCount)}
-                    onChange={(e) => setBatchCount(Number(e.currentTarget.value))}
-                    fontSize={1}
-                    style={{ width: 60 }}
-                  >
-                    {[2, 3, 4, 5].map((n) => (
-                      <option key={n} value={String(n)}>
-                        {n}
-                      </option>
-                    ))}
-                  </Select>
-                </Flex>
-              ) : null}
-            </Flex>
           ) : null}
 
           {/* App picker */}
@@ -1975,15 +1757,13 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                 <Stack space={2}>
                   <Flex align="center" justify="space-between">
                     <Text size={1}>
-                      Est. {batchMode && batchCount > 1
-                        ? `${costEstimate.estimatedCredits.expected * batchCount} credits (${batchCount} x ${costEstimate.estimatedCredits.expected})`
-                        : `${costEstimate.estimatedCredits.expected} credits`}
+                      Est. {costEstimate.estimatedCredits.expected} credits
                     </Text>
                     <Text size={1} muted>
                       Balance: {costEstimate.currentBalance}
                     </Text>
                   </Flex>
-                  {!costEstimate.affordable || (batchMode && batchCount > 1 && costEstimate.estimatedCredits.expected * batchCount > costEstimate.currentBalance) ? (
+                  {!costEstimate.affordable ? (
                     <Flex align="center" justify="space-between">
                       <Text size={1} weight="medium" style={{ color: 'var(--card-badge-caution-fg-color)' }}>
                         Insufficient credits for this generation
