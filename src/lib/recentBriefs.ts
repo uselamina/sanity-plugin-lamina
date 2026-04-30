@@ -15,8 +15,12 @@ export interface RecentBrief {
   useCount: number;
 }
 
+function makeRecentBriefsKey(documentType?: string, fieldName?: string): string {
+  return `${PREFIX}${documentType ?? '_any'}_${fieldName ?? '_default'}`;
+}
+
 export function getRecentBriefs(documentType?: string, fieldName?: string): RecentBrief[] {
-  const key = `${PREFIX}${documentType ?? '_any'}_${fieldName ?? '_default'}`;
+  const key = makeRecentBriefsKey(documentType, fieldName);
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return [];
@@ -35,7 +39,7 @@ export function saveRecentBrief(
   appId?: string,
 ): void {
   if (!brief.trim()) return;
-  const key = `${PREFIX}${documentType ?? '_any'}_${fieldName ?? '_default'}`;
+  const key = makeRecentBriefsKey(documentType, fieldName);
   try {
     const existing = getRecentBriefs(documentType, fieldName);
     const match = existing.find((r) => r.brief === brief.trim());
@@ -50,6 +54,14 @@ export function saveRecentBrief(
       ...existing.filter((r) => r.brief !== brief.trim()),
     ].slice(0, MAX_RECENT);
     localStorage.setItem(key, JSON.stringify(updated));
+  } catch {
+    // localStorage unavailable
+  }
+}
+
+export function clearRecentBriefs(documentType?: string, fieldName?: string): void {
+  try {
+    localStorage.removeItem(makeRecentBriefsKey(documentType, fieldName));
   } catch {
     // localStorage unavailable
   }

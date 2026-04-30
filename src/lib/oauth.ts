@@ -199,32 +199,31 @@ export function clearToken(config: LaminaOAuthConfig): void {
 }
 
 /**
- * Subscribes to token changes coming from OTHER tabs (browser fires `storage`
- * events on every tab EXCEPT the one that wrote the change).
+ * Notifies the listener whenever the stored token for this config changes —
+ * either from a sibling Studio tab (browser `storage` event, fired on every
+ * tab EXCEPT the one that wrote) or from this same tab (custom event we
+ * dispatch from `storeToken` / `clearToken`, since `storage` doesn't fire in
+ * the writing tab).
  *
- * Lets a Studio tab pick up a fresh token a sibling tab just refreshed,
- * instead of trying to refresh again with the now-rotated refresh token —
- * which would 400 with `invalid_grant` and force a confusing re-login.
+ * Listener is parameterless to match `useSyncExternalStore`'s contract — it
+ * just signals "re-read the snapshot." Consumers should call `getStoredToken`
+ * to read the current value.
  *
  * Returns an unsubscribe function for cleanup.
  */
 export function subscribeToTokenChanges(
   config: LaminaOAuthConfig,
-  onChange: (token: string | null) => void,
+  listener: () => void,
 ): () => void {
   const key = storageKey(config);
   const handler = (event: StorageEvent) => {
     if (event.key !== key) return;
-    if (event.newValue === null) {
-      onChange(null);
-      return;
-    }
-    onChange(getStoredToken(config));
+    listener();
   };
   const sameTabHandler = (event: Event) => {
     const detail = (event as CustomEvent<{ key?: string }>).detail;
     if (detail?.key !== key) return;
-    onChange(getStoredToken(config));
+    listener();
   };
   window.addEventListener('storage', handler);
   window.addEventListener(TOKEN_CHANGE_EVENT, sameTabHandler);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Box,
   Button,
@@ -55,14 +55,20 @@ interface CostEstimateWithManageUrl extends CostEstimate {
 }
 import { useLamina } from '../lib/LaminaContext.js';
 import { getRoutedAppId, saveRoutedAppId } from '../lib/appRouting.js';
-import { getRecentBriefs, saveRecentBrief } from '../lib/recentBriefs.js';
+import { clearRecentBriefs, getRecentBriefs, saveRecentBrief } from '../lib/recentBriefs.js';
 import { detectAspectRatio, ASPECT_RATIO_OPTIONS } from '../lib/aspectRatio.js';
 import type { LaminaAspectRatio } from '../lib/aspectRatio.js';
 import type { GeneratedOutput, GenerationState } from '../types.js';
 import type { EnhanceResult } from '../lib/briefEnhancer.js';
-import { useTypeahead } from '../lib/useTypeahead.js';
-import { getFieldMeta, extractSiblingContext, buildSchemaAwarePrompt } from '../lib/schemaContext.js';
-import type { SiblingValue } from '../lib/schemaContext.js';
+import { useDocumentBrief } from '../lib/useDocumentBrief.js';
+import { classifyRunFailure } from '../lib/classifyGenerationError.js';
+import {
+  clearDialogState,
+  patchDialogState,
+  readDialogState,
+  type CachedRunMode,
+  type RunCache,
+} from '../lib/dialogStore.js';
 
 const MODALITIES = [
   { value: '', label: 'Auto-detect' },
@@ -204,6 +210,17 @@ function toGeneratedOutput(out: ExecutionOutput): GeneratedOutput | null {
   };
 }
 
+function failureMessageFromRun(run: ExecutionStatus): string {
+  const parentError = typeof run.errorMessage === 'string' ? run.errorMessage.trim() : '';
+  if (parentError) return parentError;
+
+  const outputError = (run.outputs ?? [])
+    .map((output) => (typeof output.error === 'string' ? output.error.trim() : ''))
+    .find(Boolean);
+
+  return outputError || 'Generation failed.';
+}
+
 function progressFromStatus(status: ExecutionStatus): number | null {
   // SDK 0.2.0 provides native progress.percentComplete (number | null).
   if (typeof status.progress?.percentComplete === 'number') {
@@ -212,9 +229,9 @@ function progressFromStatus(status: ExecutionStatus): number | null {
   // Fallback for older API responses without granular progress
   switch (status.status) {
     case 'queued':
-      return 10;
+      return 0;
     case 'running':
-      return 50;
+      return 0;
     case 'completed':
       return 100;
     case 'failed':
@@ -222,6 +239,20 @@ function progressFromStatus(status: ExecutionStatus): number | null {
     default:
       return null;
   }
+}
+
+/**
+ * Merge a freshly-observed progress value with the previously-displayed one,
+ * never going backward. Industry-standard loader behavior — once the user
+ * has seen "30%" we don't show them "10%" again, even if the server's notion
+ * of progress dipped (e.g. queued→running transition reports 0% momentarily).
+ *
+ * Keeps null only when both are null. A real number always wins over null.
+ */
+function monotonicProgress(prev: number | null, next: number | null): number | null {
+  if (next == null) return prev;
+  if (prev == null) return next;
+  return next > prev ? next : prev;
 }
 
 function describeError(err: unknown): string {
@@ -493,66 +524,10 @@ function extractDocumentExcerpt(
   return null;
 }
 
-// -- Document context for brief pre-filling --
-
-interface DocumentContext {
-  documentType?: string;
-  documentTitle?: string;
-  fieldName?: string;
-  fieldDescription?: string;
-}
-
-const FIELD_LABELS: Record<string, string> = {
-  heroImage: 'hero image',
-  mainImage: 'main image',
-  thumbnail: 'thumbnail',
-  ogImage: 'social preview image',
-  coverImage: 'cover image',
-  poster: 'poster',
-  avatar: 'avatar',
-  logo: 'logo',
-  icon: 'icon',
-  banner: 'banner',
-  background: 'background image',
-};
-
-const TYPE_LABELS: Record<string, string> = {
-  product: 'product',
-  post: 'blog post',
-  blogPost: 'blog post',
-  article: 'article',
-  page: 'page',
-  landingPage: 'landing page',
-  category: 'category',
-  author: 'author',
-  event: 'event',
-  project: 'project',
-};
-
-function buildSuggestedBrief(ctx: DocumentContext): string {
-  const parts: string[] = [];
-
-  const fieldLabel = ctx.fieldName ? FIELD_LABELS[ctx.fieldName] || ctx.fieldName.replace(/([A-Z])/g, ' $1').toLowerCase().trim() : null;
-  const typeLabel = ctx.documentType ? TYPE_LABELS[ctx.documentType] || ctx.documentType.replace(/([A-Z])/g, ' $1').toLowerCase().trim() : null;
-
-  if (fieldLabel) {
-    parts.push(fieldLabel.charAt(0).toUpperCase() + fieldLabel.slice(1));
-  }
-
-  if (typeLabel && ctx.documentTitle) {
-    parts.push(`for ${typeLabel}: ${ctx.documentTitle}`);
-  } else if (ctx.documentTitle) {
-    parts.push(`for ${ctx.documentTitle}`);
-  } else if (typeLabel) {
-    parts.push(`for ${typeLabel}`);
-  }
-
-  if (ctx.fieldDescription) {
-    parts.push(`(${ctx.fieldDescription})`);
-  }
-
-  return parts.join(' ');
-}
+// Brief placeholder + AI suggestion logic now lives in `useDocumentBrief`
+// (see ../lib/useDocumentBrief.ts). The legacy `buildSuggestedBrief` +
+// FIELD_LABELS + TYPE_LABELS were duplicated in there as the canonical
+// source — removed from this file.
 
 export function GenerateDialog(props: AssetSourceComponentProps) {
   const {
@@ -589,15 +564,12 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const fieldName = parentSchemaType?.name;
   const fieldDescription = parentSchemaType?.description ?? undefined;
 
-  const suggestedBrief = buildSuggestedBrief({
-    documentType,
-    documentTitle: documentTitle ?? undefined,
-    fieldName,
-    fieldDescription,
-  });
-
   const suggestions = getSuggestions(documentType, assetType);
-  const recentBriefs = getRecentBriefs(documentType, fieldName);
+  const [recentBriefsVersion, setRecentBriefsVersion] = useState(0);
+  const recentBriefs = useMemo(
+    () => getRecentBriefs(documentType, fieldName),
+    [documentType, fieldName, recentBriefsVersion],
+  );
 
   // -- Preset resolution --
   const presetMatch = resolvePreset(fieldName, options.presets);
@@ -605,14 +577,10 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const activePreset = presetMatch?.[1] ?? null;
 
   const [dialogTab, setDialogTab] = useState<'generate' | 'library'>('generate');
-  // Auto-fill the brief from document context on mount. Lazy initializer
-  // means this runs exactly once — clearing the textarea won't snap the
-  // suggestion back, since the state has already been seeded.
-  const [brief, setBrief] = useState(() => suggestedBrief || '');
-  // True while the textarea still shows the auto-suggestion (drives the
-  // "Suggested from document context" label). Cleared when the user edits.
-  const [briefPreFilled, setBriefPreFilled] = useState(() => Boolean(suggestedBrief));
   const [modality, setModality] = useState(activePreset?.modality ?? '');
+  // Number of variants. Used by the freestyle path on the server (clamped [1, 8]).
+  // Ignored when the agent picks an app run.
+  const [numVariants, setNumVariants] = useState<number>(2);
 
   // -- Aspect ratio auto-detection --
   const detectedRatio = detectAspectRatio(fieldName);
@@ -620,26 +588,45 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const effectiveAspectRatio: LaminaAspectRatio | null =
     aspectRatioOverride || detectedRatio?.ratio || null;
 
-  // Listen for regenerate events from field-level "Regenerate" button (#59)
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.brief && typeof detail.brief === 'string') {
-        setBrief(detail.brief);
-        setBriefPreFilled(true);
-      }
+  // Lazy initializer: synchronously hydrate `state` from a previously-stored
+  // run for this (doc, field) so reopening the dialog brings back the same
+  // results / spinner / error. The dialogStore enforces RUN_TTL — entries
+  // older than 24h come back as `run: null`, which falls through to the
+  // fresh-start default. The mount-effect below verifies still-running runs
+  // against the server before resuming polling.
+  const [state, setState] = useState<GenerationState>(() => {
+    const cached = readDialogState(documentId, fieldName);
+    const cachedRun = cached?.run;
+    if (!cachedRun) {
+      return { status: 'idle', runId: null, outputs: [], error: null, progress: null };
+    }
+    const status: GenerationState['status'] =
+      cachedRun.status === 'generating'
+        ? 'generating'
+        : cachedRun.status === 'completed'
+          ? 'completed'
+          : cachedRun.status === 'failed'
+            ? 'failed'
+            : 'idle';
+    return {
+      status,
+      runId: cachedRun.runId,
+      outputs: cachedRun.outputs ?? [],
+      error: cachedRun.error,
+      progress: cachedRun.progress,
     };
-    window.addEventListener('lamina:regenerate', handler);
-    return () => window.removeEventListener('lamina:regenerate', handler);
-  }, []);
-
-  const [state, setState] = useState<GenerationState>({
-    status: 'idle',
-    runId: null,
-    outputs: [],
-    error: null,
-    progress: null,
   });
+
+  // The cached `mode` field. Needed by the resume effect to know whether to
+  // call `client.runs.get` or `client.freestyle.get` against the runId.
+  const [cachedRunMode, setCachedRunMode] = useState<CachedRunMode | null>(() => {
+    const cached = readDialogState(documentId, fieldName);
+    return cached?.run?.mode ?? null;
+  });
+
+  // hasCachedState is derived after the useDocumentBrief hook call below
+  // (it needs briefStatus to be in scope). Lives there to avoid a forward-
+  // reference dance.
 
   // needsInput state
   const [needsInputCtx, setNeedsInputCtx] = useState<NeedsInputContext | null>(null);
@@ -676,45 +663,55 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const [selectedCampaignId, setSelectedCampaignId] = useState<string>('');
   const [brandsLoaded, setBrandsLoaded] = useState(false);
 
-  // AI brief suggestions via /v1/content/brief
-  const [aiSuggestions, setAiSuggestions] = useState<ContentConcept[]>([]);
-  const [aiSuggestionsLoading, setAiSuggestionsLoading] = useState(false);
-  const aiSuggestionsCacheKey = useRef<string | null>(null);
-
   // -- Enhance brief state (#66) --
+  // (Separate feature from the auto-suggested AI brief. This is the
+  //  "Enhance brief before generating" toggle that fires at click-Generate
+  //  time to refine the user's brief before it goes to the run pipeline.)
   const [enhanceEnabled, setEnhanceEnabled] = useState(true);
   const [enhanceResult, setEnhanceResult] = useState<EnhanceResult | null>(null);
   const [enhanceLoading, setEnhanceLoading] = useState(false);
-  /** Tracks whether the current brief came from an AI suggestion (already optimized). */
 
-  // -- Schema-aware context (#67) --
-  const sanitySchema = useSchema();
-  const schemaType = documentType ? sanitySchema.get(documentType) : undefined;
-  const fieldMeta = getFieldMeta(schemaType, fieldName ?? '');
-  const siblingValues: SiblingValue[] = extractSiblingContext(schemaType, (name) => {
-    // We read a limited set of known context fields via useFormValue equivalents.
-    // Since hooks can't be called dynamically, we read them via the already-extracted values.
-    if (name === 'title') return documentTitle;
-    if (name === 'description') return rawDescription;
-    return undefined;
-  });
-  const schemaAwarePrompt = buildSchemaAwarePrompt(fieldMeta, siblingValues, documentType, documentTitle ?? undefined);
-
-  // -- Typeahead hook (#65) --
-  const typeahead = useTypeahead(
+  // -- Document brief (the textarea state machine) --
+  // One hook owns: brief value, system-vs-user status, mount-effect AI fetch,
+  // typeahead chips. Replaces the previous 7-state-variable tangle.
+  const {
+    briefText: brief,
+    setBriefText: setBrief,
+    applyChip,
+    resetBrief,
+    briefStatus,
+    typeaheadChips,
+    typeaheadLoading,
+  } = useDocumentBrief({
     client,
-    brief,
-    {
-      modality: modality || (assetType === 'file' ? 'video' : 'image'),
-      brandProfileId: selectedBrandId || undefined,
-      documentType,
-      documentTitle: documentTitle ?? undefined,
-      fieldName,
-      documentExcerpt: documentExcerpt ?? undefined,
-    },
-    (state.status === 'idle' || state.status === 'failed') && brief.length >= 8,
-  );
+    documentId,
+    documentType,
+    documentTitle: documentTitle ?? undefined,
+    documentExcerpt: documentExcerpt ?? undefined,
+    fieldName,
+    fieldDescription,
+    fullDocument,
+    modality,
+    assetType,
+    selectedBrandId: selectedBrandId || undefined,
+    typeaheadEnabled: state.status === 'idle' || state.status === 'failed',
+  });
 
+  // Whether the textarea is showing a system-set value (initial placeholder
+  // or AI-replaced). Drives the "Suggested from document context" caption.
+  // After the user types ('user-edited') OR picks a chip ('chip-applied'),
+  // the text is theirs — no caption.
+  const briefPreFilled =
+    briefStatus === 'placeholder' || briefStatus === 'ai-loading' || briefStatus === 'ai-ready';
+
+  // Derived: is anything worth clearing in localStorage for this (doc, field)?
+  //   - briefStatus past 'placeholder' means the brief cache holds something.
+  //   - state.runId means the run cache holds a run.
+  //   - recentBriefs means the older per-(docType, field) prompt history has entries.
+  // Re-renders keep this in sync with the underlying state — no separate
+  // useState, no localStorage polling.
+  const hasCachedState =
+    briefStatus !== 'placeholder' || state.runId !== null || recentBriefs.length > 0;
 
   // Auto-set app from preset on mount
   useEffect(() => {
@@ -722,44 +719,6 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       setSelectedAppId(activePreset.appId);
     }
   }, [activePreset?.appId, selectedAppId]);
-
-  // DISABLED — Fetch AI brief suggestions from /v1/content/brief on mount.
-  // The chip UI that consumed `aiSuggestions` was removed, and the backend's
-  // /v1/content/brief is currently broken (server's LLM client throws
-  // "model.generateContent is not a function"). Re-enable once both the UI
-  // and the backend endpoint are sorted.
-  // useEffect(() => {
-  //   const cacheKey = `${documentType}:${fieldName}:${selectedBrandId}`;
-  //   if (aiSuggestionsCacheKey.current === cacheKey) return;
-  //   aiSuggestionsCacheKey.current = cacheKey;
-  //
-  //   let cancelled = false;
-  //   (async () => {
-  //     setAiSuggestionsLoading(true);
-  //     try {
-  //       const resolvedModality = modality || (assetType === 'file' ? 'video' : 'image');
-  //       const goalParts = [
-  //         `${fieldName ? FIELD_LABELS[fieldName] || fieldName : 'media'} for ${documentType || 'content'}`,
-  //         ...(documentTitle ? [`: ${documentTitle}`] : []),
-  //         ...(documentExcerpt ? [` — ${documentExcerpt}`] : []),
-  //       ];
-  //       const briefParams: ContentBriefParams = {
-  //         goal: goalParts.join(''),
-  //         modality: resolvedModality,
-  //         count: 3,
-  //         ...(selectedBrandId ? { brandProfileId: selectedBrandId } : {}),
-  //       };
-  //       const result = await client.content.brief(briefParams);
-  //       if (cancelled) return;
-  //       setAiSuggestions(result.data?.concepts ?? []);
-  //     } catch {
-  //       if (!cancelled) setAiSuggestions([]);
-  //     } finally {
-  //       if (!cancelled) setAiSuggestionsLoading(false);
-  //     }
-  //   })();
-  //   return () => { cancelled = true; };
-  // }, [client, documentType, documentTitle, fieldName, modality, assetType, selectedBrandId]);
 
   // Library picker state
   const [libraryFilter, setLibraryFilter] = useState<AssetTypeFilter>(
@@ -787,6 +746,174 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   );
 
   const abortRef = useRef<AbortController | null>(null);
+
+  // ─── Run-cache helpers ─────────────────────────────────────────────────
+  // Writes go through these so persistence stays in lockstep with React
+  // state. They no-op when documentId/fieldName aren't both set (the
+  // dialogStore primitives already guard, but skipping here also avoids
+  // computing JSON we'll never write).
+  const persistRun = useCallback(
+    (run: RunCache | null) => {
+      if (!documentId || !fieldName) return;
+      patchDialogState(documentId, fieldName, { run });
+      setCachedRunMode(run?.mode ?? null);
+    },
+    [documentId, fieldName],
+  );
+  const updateRunCache = useCallback(
+    (updater: (prev: RunCache | null) => RunCache | null) => {
+      if (!documentId || !fieldName) return;
+      const prior = readDialogState(documentId, fieldName)?.run ?? null;
+      const next = updater(prior);
+      patchDialogState(documentId, fieldName, { run: next });
+      setCachedRunMode(next?.mode ?? null);
+    },
+    [documentId, fieldName],
+  );
+
+  /**
+   * User-initiated "start fresh" action: wipes both brief and run cache for
+   * this (doc, field), aborts any in-flight polling, and resets local state.
+   * The next dialog open will start as if it had never been opened before:
+   *   - placeholder brief shown
+   *   - AI brief refetched (no docHash to match against)
+   *   - no previous outputs
+   */
+  const handleClearCachedState = useCallback(() => {
+    abortRef.current?.abort();
+    setState({ status: 'idle', runId: null, outputs: [], error: null, progress: null });
+    setNeedsInputCtx(null);
+    setCollectedInputs({});
+    setSelectedOutputIds(new Set());
+    setTimeoutWarning(false);
+    setEnhanceResult(null);
+    setEnhanceLoading(false);
+    if (timeoutWarningRef.current) {
+      clearTimeout(timeoutWarningRef.current);
+      timeoutWarningRef.current = null;
+    }
+    if (documentId && fieldName) {
+      clearDialogState(documentId, fieldName);
+      setCachedRunMode(null);
+    }
+    clearRecentBriefs(documentType, fieldName);
+    setRecentBriefsVersion((v) => v + 1);
+    // Snap the brief hook back to its placeholder + re-arm the AI mount
+    // fetch so the user sees the field reset visually and a fresh AI brief
+    // gets generated for the current doc state.
+    resetBrief();
+  }, [documentId, documentType, fieldName, resetBrief]);
+
+  // ─── Resume cached run on mount ──────────────────────────────────────────
+  // If `state` was hydrated from a cached run with status='generating', we
+  // need to verify the run with the server (it may have completed while the
+  // dialog was closed) and either:
+  //   - settle the local state to the terminal server state, OR
+  //   - resume polling via .wait() until terminal.
+  //
+  // This is the "idempotent resume" — never starts a new run, only re-attaches.
+  // 404 / fetch error → fall back to a fresh-start state (cache was stale).
+  const resumeFiredRef = useRef(false);
+  useEffect(() => {
+    if (resumeFiredRef.current) return;
+    if (state.status !== 'generating' || !state.runId || !cachedRunMode) return;
+    resumeFiredRef.current = true;
+
+    const runId = state.runId;
+    const mode = cachedRunMode;
+    const abort = new AbortController();
+    abortRef.current = abort;
+
+    void (async () => {
+      const poller = mode === 'freestyle' ? client.freestyle : client.runs;
+      try {
+        // First: cheap GET to see current server state. If terminal, we're done.
+        const fresh = await poller.get(runId);
+        if (abort.signal.aborted) return;
+
+        if (fresh.data.status === 'completed' || fresh.data.status === 'failed') {
+          const outputs = (fresh.data.outputs ?? [])
+            .map(toGeneratedOutput)
+            .filter((o): o is GeneratedOutput => o !== null);
+          if (fresh.data.status === 'failed') {
+            const errorMsg = failureMessageFromRun(fresh.data);
+            setState({ status: 'failed', runId, outputs, error: errorMsg, progress: null });
+            updateRunCache((prev) =>
+              prev && prev.runId === runId
+                ? { ...prev, status: 'failed', error: errorMsg, outputs, progress: null }
+                : prev,
+            );
+          } else {
+            setState({ status: 'completed', runId, outputs, error: null, progress: 100 });
+            updateRunCache((prev) =>
+              prev && prev.runId === runId
+                ? { ...prev, status: 'completed', outputs, progress: 100, error: null }
+                : prev,
+            );
+          }
+          return;
+        }
+
+        // Still running on server — re-attach polling.
+        // eslint-disable-next-line no-console
+        console.log('[lamina/run] resuming polling for', runId, 'mode=', mode);
+        const result = await poller.wait(runId, {
+          intervalMs: 3000,
+          timeoutMs: GENERATION_TIMEOUT_MS,
+          onPoll(status) {
+            if (abort.signal.aborted) return;
+            const nextProgress = progressFromStatus(status);
+            setState((prev) => ({
+              ...prev,
+              progress: monotonicProgress(prev.progress, nextProgress),
+            }));
+            updateRunCache((prev) =>
+              prev && prev.runId === runId
+                ? { ...prev, progress: monotonicProgress(prev.progress, nextProgress) }
+                : prev,
+            );
+          },
+        });
+        if (abort.signal.aborted) return;
+
+        if (result.data.status === 'failed') {
+          const errorMsg = failureMessageFromRun(result.data);
+          setState({ status: 'failed', runId, outputs: [], error: errorMsg, progress: null });
+          updateRunCache((prev) =>
+            prev && prev.runId === runId
+              ? { ...prev, status: 'failed', error: errorMsg, progress: null }
+              : prev,
+          );
+          return;
+        }
+        const outputs = result.data.outputs
+          .map(toGeneratedOutput)
+          .filter((o): o is GeneratedOutput => o !== null);
+        setState({ status: 'completed', runId, outputs, error: null, progress: 100 });
+        updateRunCache((prev) =>
+          prev && prev.runId === runId
+            ? { ...prev, status: 'completed', outputs, progress: 100, error: null }
+            : prev,
+        );
+      } catch (err) {
+        if (abort.signal.aborted) return;
+        // eslint-disable-next-line no-console
+        console.warn('[lamina/run] resume failed; falling back to fresh start', err);
+        // Cache was stale (run deleted, server restarted, etc.). Reset to
+        // idle and clear the cache entry — the user can hit Generate again.
+        setState({ status: 'idle', runId: null, outputs: [], error: null, progress: null });
+        if (documentId && fieldName) clearDialogState(documentId, fieldName);
+      }
+    })();
+
+    return () => {
+      abort.abort();
+    };
+    // Run-once on mount. We deliberately don't depend on state.* here — the
+    // `resumeFiredRef` guard makes this fire-once semantics; further state
+    // changes are handled by the effect's own polling, not by re-firing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // -- Load brand profiles and campaigns on mount --
   useEffect(() => {
@@ -929,7 +1056,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       ...prev,
       status: 'generating',
       error: null,
-      progress: 10,
+      progress: 0,
     }));
 
     try {
@@ -969,7 +1096,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           if (abort.signal.aborted) return;
           setState((prev) => ({
             ...prev,
-            progress: progressFromStatus(status),
+            progress: monotonicProgress(prev.progress, progressFromStatus(status)),
           }));
         },
       });
@@ -977,10 +1104,11 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       if (abort.signal.aborted) return;
 
       if (result.data.status === 'failed') {
+        const errorMsg = failureMessageFromRun(result.data);
         setState((prev) => ({
           ...prev,
           status: 'failed',
-          error: result.data.errorMessage || 'Generation failed.',
+          error: errorMsg,
           progress: null,
         }));
         return;
@@ -1026,7 +1154,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       runId: null,
       outputs: [],
       error: null,
-      progress: 10,
+      progress: 0,
     });
     setNeedsInputCtx(null);
     setCollectedInputs({});
@@ -1054,6 +1182,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         },
         ...(selectedAppId ? { appId: selectedAppId } : {}),
         ...(options.webhookUrl ? { webhookUrl: options.webhookUrl } : {}),
+        numVariants,
       });
 
       if (abort.signal.aborted) return;
@@ -1075,27 +1204,61 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       const runId = data.runId;
       setState((prev) => ({ ...prev, runId }));
 
-      const result = await client.runs.wait(runId, {
+      // Persist the brand-new run to localStorage. This is the moment the
+      // (doc, field) gets a "live run" — close-and-reopen will resume from
+      // here even if polling is interrupted.
+      const mode: CachedRunMode = data.mode === 'freestyle' ? 'freestyle' : 'app';
+      persistRun({
+        runId,
+        mode,
+        status: 'generating',
+        outputs: [],
+        progress: 0,
+        error: null,
+        startedAt: Date.now(),
+        brief: brief.trim(),
+        ...(selectedAppId ? { appId: selectedAppId } : {}),
+        numVariants,
+      });
+
+      // Branch on `mode === 'freestyle'` — server returns this when it dispatched
+      // parallel FAL calls with no app match. Same response shape, different URL.
+      const poller = mode === 'freestyle' ? client.freestyle : client.runs;
+      const result = await poller.wait(runId, {
         intervalMs: 3000,
         timeoutMs: GENERATION_TIMEOUT_MS,
         onPoll(status) {
           if (abort.signal.aborted) return;
+          const nextProgress = progressFromStatus(status);
           setState((prev) => ({
             ...prev,
-            progress: progressFromStatus(status),
+            progress: monotonicProgress(prev.progress, nextProgress),
           }));
+          // Mirror progress to the run cache so a reopen mid-generation
+          // shows accurate progress immediately (before the next poll lands).
+          updateRunCache((prev) =>
+            prev && prev.runId === runId
+              ? { ...prev, progress: monotonicProgress(prev.progress, nextProgress) }
+              : prev,
+          );
         },
       });
 
       if (abort.signal.aborted) return;
 
       if (result.data.status === 'failed') {
+        const errorMsg = failureMessageFromRun(result.data);
         setState((prev) => ({
           ...prev,
           status: 'failed',
-          error: result.data.errorMessage || 'Generation failed.',
+          error: errorMsg,
           progress: null,
         }));
+        updateRunCache((prev) =>
+          prev && prev.runId === runId
+            ? { ...prev, status: 'failed', error: errorMsg, progress: null }
+            : prev,
+        );
         return;
       }
 
@@ -1110,6 +1273,11 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         error: null,
         progress: 100,
       });
+      updateRunCache((prev) =>
+        prev && prev.runId === runId
+          ? { ...prev, status: 'completed', outputs, progress: 100, error: null }
+          : prev,
+      );
 
       // Save app routing and brief to recent history
       if (outputs.length > 0) {
@@ -1117,21 +1285,29 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           saveRoutedAppId(documentType, fieldName, selectedAppId);
         }
         saveRecentBrief(documentType, fieldName, brief, selectedAppId ?? undefined);
+        setRecentBriefsVersion((v) => v + 1);
       }
     } catch (err) {
       if (abort.signal.aborted) return;
       const isTimeout =
         err instanceof Error && err.message.toLowerCase().includes('timed out');
+      const errorMsg = isTimeout
+        ? 'Generation timed out after 30 minutes. Please try again with a simpler brief.'
+        : describeError(err);
       setState((prev) => ({
         ...prev,
         status: 'failed',
-        error: isTimeout
-          ? 'Generation timed out after 30 minutes. Please try again with a simpler brief.'
-          : describeError(err),
+        error: errorMsg,
         progress: null,
       }));
+      // We don't always have a stable `runId` at this point (the throw could
+      // have happened before autoGenerate returned). updateRunCache only
+      // patches when the cached run matches, so this is safe either way.
+      updateRunCache((prev) =>
+        prev ? { ...prev, status: 'failed', error: errorMsg, progress: null } : prev,
+      );
     }
-  }, [brief, modality, assetType, selectedAppId, options.webhookUrl, effectiveAspectRatio, client, fieldName, fieldDescription, fullDocument]);
+  }, [brief, modality, assetType, selectedAppId, options.webhookUrl, effectiveAspectRatio, client, fieldName, fieldDescription, fullDocument, numVariants, persistRun, updateRunCache, documentType]);
 
   // Proxy a CDN URL through transferAsset to avoid CORS issues
   const resolveAssetUrl = useCallback(
@@ -1193,10 +1369,20 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     }
     if (pendingAssets) {
       onSelect(pendingAssets);
+      // Asset has been consumed → drop the run cache so the next dialog
+      // open for this field starts clean (no stale "previous run" results).
+      // We deliberately keep the brief cache so the user's textarea text
+      // and AI-brief docHash survive across asset insertions.
+      if (documentId && fieldName) {
+        patchDialogState(documentId, fieldName, { run: null });
+      }
     }
     setPendingAssets(null);
     setFeedbackState(null);
-  }, [pendingAssets, onSelect]);
+    setState({ status: 'idle', runId: null, outputs: [], error: null, progress: null });
+    setSelectedOutputIds(new Set());
+    setCachedRunMode(null);
+  }, [pendingAssets, onSelect, documentId, fieldName]);
 
   const submitFeedback = useCallback(
     async (rating: 'positive' | 'negative') => {
@@ -1309,11 +1495,25 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       clearTimeout(timeoutWarningRef.current);
       timeoutWarningRef.current = null;
     }
-  }, []);
+    // User canceled / dismissed an in-progress or failed run — clear the
+    // run cache. We keep the brief cache so their textarea text persists.
+    if (documentId && fieldName) {
+      patchDialogState(documentId, fieldName, { run: null });
+      setCachedRunMode(null);
+    }
+  }, [documentId, fieldName]);
 
   // Sanity types selectionType as 'single' but future versions may support 'multiple'
   const isMultiple = (selectionType as string) === 'multiple';
   const isIdle = state.status === 'idle' || state.status === 'failed';
+  const generationError =
+    state.status === 'failed' && state.error ? classifyRunFailure(state.error) : null;
+  const generationErrorMessage =
+    generationError?.kind === 'needs_choice'
+      ? generationError.reason
+      : generationError?.kind === 'insufficient_credits'
+        ? 'Your workspace does not have enough credits for this generation.'
+        : generationError?.message;
 
   // Keyboard shortcuts (#60): Cmd/Ctrl+Enter to generate, Escape to cancel
   useEffect(() => {
@@ -1433,26 +1633,46 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         <Stack space={4}>
           {/* Brief input */}
           <Stack space={2}>
-            <Label size={1}>Describe what you need</Label>
+            <Flex align="center" justify="space-between" gap={2}>
+              <Label size={1}>Describe what you need</Label>
+              {hasCachedState ? (
+                <Button
+                  text="Clear cache"
+                  icon={ResetIcon}
+                  mode="bleed"
+                  tone="default"
+                  fontSize={0}
+                  padding={2}
+                  onClick={handleClearCachedState}
+                  title="Clears the saved brief, recent prompts, and any previous results for this field."
+                />
+              ) : null}
+            </Flex>
             <TextArea
               value={brief}
-              onChange={(e) => {
-                setBrief(e.currentTarget.value);
-                if (briefPreFilled) setBriefPreFilled(false);
-              }}
+              onChange={(e) => setBrief(e.currentTarget.value)}
               placeholder="Product photo of white sneakers on marble surface, lifestyle aesthetic"
               rows={3}
               disabled={state.status === 'generating'}
             />
-            {/* Typeahead suggestions as you type (#65) */}
-            {brief && isIdle && typeahead.suggestions.length > 0 ? (
+
+            {/* AI brief loading — fires on popup open, before user has typed */}
+            {briefStatus === 'ai-loading' ? (
+              <Flex align="center" gap={2}>
+                <Spinner />
+                <Text size={0} muted>Generating AI brief from document context…</Text>
+              </Flex>
+            ) : null}
+
+            {/* Typeahead chips — appear after the user actively edits the brief */}
+            {brief && isIdle && typeaheadChips.length > 0 ? (
               <Stack space={1}>
                 <Flex align="center" gap={2}>
                   <Text size={0} muted weight="medium">Suggestions</Text>
-                  {typeahead.loading ? <Spinner /> : null}
+                  {typeaheadLoading ? <Spinner /> : null}
                 </Flex>
                 <Inline space={1}>
-                  {typeahead.suggestions.map((c) => (
+                  {typeaheadChips.map((c) => (
                     <Button
                       key={c.title}
                       text={c.prompt.length > 50 ? `${c.prompt.substring(0, 50)}...` : c.prompt}
@@ -1461,18 +1681,21 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                       fontSize={0}
                       padding={2}
                       tone="primary"
-                      onClick={() => { setBrief(c.prompt); typeahead.clear(); }}
+                      onClick={() => applyChip(c.prompt)}
                     />
                   ))}
                 </Inline>
               </Stack>
-            ) : brief && isIdle && typeahead.loading ? (
+            ) : brief && isIdle && typeaheadLoading ? (
               <Flex align="center" gap={2}>
                 <Spinner />
-                <Text size={0} muted>Finding suggestions...</Text>
+                <Text size={0} muted>Finding suggestions…</Text>
               </Flex>
             ) : null}
-            {briefPreFilled && suggestedBrief ? (
+
+            {/* "Suggested from document context" caption — shows while the
+                textarea still holds a system-set value (placeholder or AI). */}
+            {briefPreFilled ? (
               <Text size={0} muted>
                 Suggested from document context
               </Text>
@@ -1556,6 +1779,24 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                 Detected: {detectedRatio.label}
               </Text>
             ) : null}
+          </Stack>
+
+          {/* Number of variants — used by the freestyle (no app match) path */}
+          <Stack space={2}>
+            <Label size={1}>Variants</Label>
+            <Select
+              value={String(numVariants)}
+              onChange={(e) => setNumVariants(Number(e.currentTarget.value))}
+              disabled={state.status === 'generating'}
+            >
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+            </Select>
+            <Text size={0} muted>
+              How many alternative outputs to generate.
+            </Text>
           </Stack>
 
           {/* Brand profile selector */}
@@ -1768,11 +2009,14 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                       <Text size={1} weight="medium" style={{ color: 'var(--card-badge-caution-fg-color)' }}>
                         Insufficient credits for this generation
                       </Text>
-                      {creditsManageUrl ? (
-                        <a href={creditsManageUrl} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
-                          <Button text="Add credits" mode="ghost" tone="primary" fontSize={0} padding={2} as="span" />
-                        </a>
-                      ) : null}
+                      <a
+                        href={creditsManageUrl ?? 'https://app.uselamina.ai/pricing'}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ textDecoration: 'none' }}
+                      >
+                        <Button text="Add credits" mode="ghost" tone="primary" fontSize={0} padding={2} as="span" />
+                      </a>
                     </Flex>
                   ) : null}
                 </Stack>
@@ -1791,13 +2035,43 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           ) : null}
 
           {/* Error */}
-          {state.status === 'failed' && state.error ? (
-            <Card padding={3} radius={2} tone="critical">
+          {generationError ? (
+            <Card
+              padding={3}
+              radius={2}
+              tone={generationError.kind === 'insufficient_credits' ? 'caution' : 'critical'}
+              border
+            >
               <Stack space={3}>
-                <Text size={1}>{state.error}</Text>
+                <Stack space={2}>
+                  <Text size={1} weight="medium">
+                    {generationError.kind === 'insufficient_credits'
+                      ? 'Not enough credits'
+                      : 'Generation failed'}
+                  </Text>
+                  <Text size={1}>
+                    {generationErrorMessage}
+                  </Text>
+                </Stack>
                 <Inline space={2}>
+                  {generationError.kind === 'insufficient_credits' ? (
+                    <a
+                      href={generationError.topUpUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ textDecoration: 'none' }}
+                    >
+                      <Button
+                        text="Upgrade / add credits"
+                        tone="primary"
+                        as="span"
+                        fontSize={1}
+                        padding={2}
+                      />
+                    </a>
+                  ) : null}
                   <Button
-                    text="Try again"
+                    text={generationError.kind === 'insufficient_credits' ? 'Try again after upgrading' : 'Try again'}
                     icon={ResetIcon}
                     tone="default"
                     mode="ghost"

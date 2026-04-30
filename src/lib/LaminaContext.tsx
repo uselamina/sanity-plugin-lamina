@@ -1,8 +1,18 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { LaminaClient } from '@uselamina/sdk';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from 'react';
+import { LaminaClient, LaminaAuthError } from '@uselamina/sdk';
 import { Button, Card, Flex, Stack, Text, Spinner } from '@sanity/ui';
 import type { LaminaPluginOptions } from '../types.js';
 import {
+  clearToken,
   exchangeCode,
   getStoredToken,
   prepareOAuthFlow,
@@ -10,6 +20,7 @@ import {
   storeToken,
   subscribeToTokenChanges,
 } from './oauth.js';
+import { gcDialogState } from './dialogStore.js';
 
 const LAMINA_ORIGIN = 'https://app.uselamina.ai';
 
@@ -42,10 +53,8 @@ export function useLamina(): LaminaContextValue {
 
 function OAuthLogin({
   options,
-  onAuthenticated,
 }: {
   options: LaminaPluginOptions;
-  onAuthenticated: (token: string) => void;
 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -105,13 +114,15 @@ function OAuthLogin({
 
         try {
           const tokens = await exchangeCode(options.oauth!, baseUrl, code);
+          // storeToken dispatches the token-change event; useResolvedToken
+          // (via useSyncExternalStore) re-reads localStorage in the parent
+          // and re-renders, replacing this <OAuthLogin> with the real UI.
           storeToken(
             options.oauth!,
             tokens.accessToken,
             tokens.refreshToken,
             tokens.expiresIn,
           );
-          onAuthenticated(tokens.accessToken);
         } catch (err) {
           setError(
             err instanceof Error ? err.message : 'Authentication failed.',
@@ -132,7 +143,7 @@ function OAuthLogin({
         }
       }, 500);
     })();
-  }, [options, baseUrl, onAuthenticated]);
+  }, [options, baseUrl]);
 
   return (
     <Card padding={4}>
@@ -177,6 +188,37 @@ function OAuthLogin({
   );
 }
 
+/**
+ * Reads the active token reactively.
+ *
+ * localStorage is the single source of truth. `useSyncExternalStore` keeps
+ * React in sync with it: this component re-renders whenever `storeToken` or
+ * `clearToken` runs (this tab via the custom event, or a sibling tab via
+ * `storage`). No `useState` mirror, no callback prop chain — every consumer
+ * reads from the same place. An explicit `options.apiKey` short-circuits the
+ * store entirely.
+ */
+function useResolvedToken(options: LaminaPluginOptions): string | null {
+  const oauthConfig = options.oauth;
+  const explicitKey = options.apiKey;
+
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      if (explicitKey || !oauthConfig) return () => {};
+      return subscribeToTokenChanges(oauthConfig, listener);
+    },
+    [oauthConfig, explicitKey],
+  );
+
+  const getSnapshot = useCallback(() => {
+    if (explicitKey) return explicitKey;
+    if (!oauthConfig) return null;
+    return getStoredToken(oauthConfig);
+  }, [explicitKey, oauthConfig]);
+
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
 export function LaminaProvider({
   options,
   children,
@@ -184,71 +226,84 @@ export function LaminaProvider({
   options: LaminaPluginOptions;
   children: ReactNode;
 }) {
-  // Resolve API key: explicit > stored OAuth token
-  const storedToken = options.oauth ? getStoredToken(options.oauth) : null;
-  const initialKey = options.apiKey || storedToken;
-
-  const [resolvedKey, setResolvedKey] = useState<string | null>(initialKey);
-
   const baseUrl = options.baseUrl || LAMINA_ORIGIN;
+  const resolvedKey = useResolvedToken(options);
 
-  // Sync when options change. For OAuth, also proactively refresh the access
-  // token if it's near expiry so the user stays logged in past the 1h access
-  // token TTL without a manual re-auth click. `refreshIfNeeded` returns:
-  //   - the existing token when it's still well within its TTL
-  //   - a freshly-rotated token when it succeeded a refresh
-  //   - null when the refresh token is missing or rejected (forces re-login)
-  //
-  // We also schedule a recurring check while OAuth is configured so mid-session
-  // expiries (long-running tabs) refresh silently before the access token dies.
-  // `refreshIfNeeded` no-ops cheaply when the token still has > 5 min of life.
+  // Sweep stale dialog-state entries from localStorage exactly once on
+  // provider mount. Drops entries past MAX_ENTRY_AGE_MS or with the wrong
+  // schema version. Cheap (just walks lamina:dialog:* keys); safe to retry.
   useEffect(() => {
-    if (options.apiKey) {
-      setResolvedKey(options.apiKey);
-      return;
-    }
-    if (!options.oauth) {
-      setResolvedKey(null);
-      return;
-    }
+    gcDialogState();
+  }, []);
 
-    let cancelled = false;
+  // Periodic refresh: when the access token nears expiry, mint a new pair
+  // via the refresh token. `refreshIfNeeded` writes the new token to
+  // localStorage on success, which fires the token-change event, which
+  // triggers `useResolvedToken` to re-read — no manual state propagation
+  // needed. `refreshIfNeeded` no-ops cheaply when the token still has > 5
+  // min of life, so running it on an interval is safe.
+  useEffect(() => {
+    if (options.apiKey || !options.oauth) return;
     const oauthConfig = options.oauth;
 
-    const check = async () => {
-      const token = await refreshIfNeeded(oauthConfig, baseUrl);
-      if (!cancelled) setResolvedKey(token);
+    const check = () => {
+      void refreshIfNeeded(oauthConfig, baseUrl);
     };
 
-    void check();
+    check();
     const intervalId = window.setInterval(check, REFRESH_CHECK_INTERVAL_MS);
 
-    // Cross-tab sync: when a sibling Studio tab refreshes or clears the
-    // token, mirror that into this tab's state. Without this, tabs race
-    // each other on refresh and the loser sees `invalid_grant` because the
-    // refresh token has been rotated.
-    const unsubscribe = subscribeToTokenChanges(oauthConfig, (token) => {
-      if (!cancelled) setResolvedKey(token);
-    });
-
     return () => {
-      cancelled = true;
       window.clearInterval(intervalId);
-      unsubscribe();
     };
   }, [options.apiKey, options.oauth, baseUrl]);
 
-  const handleAuthenticated = useCallback((token: string) => {
-    setResolvedKey(token);
-  }, []);
-
   const client = useMemo(() => {
     if (!resolvedKey) return null;
-    return new LaminaClient({
+    const real = new LaminaClient({
       apiKey: resolvedKey,
       baseUrl: options.baseUrl,
     });
-  }, [resolvedKey, options.baseUrl]);
+
+    // OAuth-only: when the access token dies (expired or revoked) mid-session,
+    // any SDK call returns 401 and surfaces "invalid apiKey" to the user. We
+    // intercept those errors at the API surface, drop the dead token from
+    // storage, and rethrow. clearToken fires the token-change event, so the
+    // useResolvedToken hook re-reads localStorage as null and the provider
+    // re-renders to <OAuthLogin> — the user just sees the sign-in screen,
+    // not an error toast. No refresh-retry: simpler, and a stale refresh
+    // token would land us at the same place anyway.
+    if (!options.oauth) return real;
+    const oauthConfig = options.oauth;
+
+    const wrapApi = <T extends object>(api: T): T =>
+      new Proxy(api, {
+        get(target, prop, receiver) {
+          const fn = Reflect.get(target, prop, receiver);
+          if (typeof fn !== 'function') return fn;
+          return async (...args: unknown[]) => {
+            try {
+              return await (fn as (...a: unknown[]) => unknown).apply(target, args);
+            } catch (err) {
+              if (err instanceof LaminaAuthError) {
+                clearToken(oauthConfig);
+              }
+              throw err;
+            }
+          };
+        },
+      });
+
+    return new Proxy(real, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        // Wrap the surface APIs (.content, .apps, .runs, .intelligence, etc.)
+        // — they're the only object-typed members the plugin calls into.
+        if (value !== null && typeof value === 'object') return wrapApi(value);
+        return value;
+      },
+    });
+  }, [resolvedKey, options.baseUrl, options.oauth]);
 
   // No API key and no OAuth configured — throw
   if (!resolvedKey && !options.oauth) {
@@ -261,7 +316,7 @@ export function LaminaProvider({
   // No API key but OAuth configured — show login
   if (!client) {
     return (
-      <OAuthLogin options={options} onAuthenticated={handleAuthenticated} />
+      <OAuthLogin options={options} />
     );
   }
 
