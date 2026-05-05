@@ -33,6 +33,9 @@ import type { AssetFromSource, AssetSourceComponentProps } from 'sanity';
 import { useFormValue, useSchema } from 'sanity';
 import { useLaminaAssets } from '../lib/useLaminaAssets.js';
 import { AssetPickerGrid } from './AssetPickerGrid.js';
+import { DecisionCard } from './DecisionCard.js';
+import { AppPickerPanel } from './AppPickerPanel.js';
+import { MissingInputsForm } from './MissingInputsForm.js';
 import type { AssetTypeFilter, LaminaAsset, LaminaPreset } from '../types.js';
 import type {
   AppSummary as SdkAppSummary,
@@ -42,6 +45,13 @@ import type {
   ExecutionOutput,
   ExecutionStatus,
   MissingInput,
+  PreviewRunResult,
+  PreviewAppMode,
+  PreviewFreestyleMode,
+  PreviewNeedsChoiceMode,
+  PreviewAgentFailedMode,
+  FormField,
+  RunConfirmedParams,
 } from '@uselamina/sdk';
 import { LaminaAuthError, LaminaRateLimitError } from '@uselamina/sdk';
 
@@ -185,6 +195,9 @@ interface AppEntry {
   icon?: string | null;
   modality?: string | null;
   inputSummary?: string | null;
+  /** Optional empty-state media (image/video URL) — when present, picker
+   *  renders a card with the thumbnail instead of a plain list row. */
+  thumbnail?: { url: string; type: 'image' | 'video' } | null;
 }
 
 interface AppPickerState {
@@ -628,9 +641,18 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   // (it needs briefStatus to be in scope). Lives there to avoid a forward-
   // reference dance.
 
-  // needsInput state
+  // needsInput state (legacy auto-generate flow — kept for back-compat)
   const [needsInputCtx, setNeedsInputCtx] = useState<NeedsInputContext | null>(null);
   const [collectedInputs, setCollectedInputs] = useState<Record<string, unknown>>({});
+
+  // ─── Preview-then-confirm flow ─────────────────────────────────────────────
+  // The agent drafts the plan in "preview mode" without dispatching anything.
+  // The plugin shows a decision card; user reviews drafted inputs, fills missing
+  // ones (one-tap suggested defaults available), then clicks "Confirm" to dispatch.
+  const [previewResult, setPreviewResult] = useState<PreviewRunResult | null>(null);
+  // User-edited values — overrides what the agent drafted. Keyed by input name.
+  // Includes both edits to drafted inputs AND fills for missing inputs.
+  const [editedInputs, setEditedInputs] = useState<Record<string, unknown>>({});
 
   // Timeout warning (#56)
   const [timeoutWarning, setTimeoutWarning] = useState(false);
@@ -965,6 +987,9 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           // SDK 0.2.0 returns inputSummary as a structured object {required, optional, total}.
           // Plugin renders this as a one-line muted hint, so collapse to a count string.
           inputSummary: a.inputSummary ? `${a.inputSummary.total} input${a.inputSummary.total === 1 ? '' : 's'}` : null,
+          // Server now returns thumbnail (extracted from settings.emptyStateMedia)
+          // — surfaces in the picker grid as a 16:9 card preview.
+          thumbnail: (a as { thumbnail?: { url: string; type: 'image' | 'video' } | null }).thumbnail ?? null,
         }));
         setAppPicker((prev) => ({ ...prev, loading: false, apps, mode: 'list', error: null }));
       } catch (err) {
@@ -977,32 +1002,63 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     }
   }, [client, appPicker.expanded, appPicker.apps.length]);
 
-  const handleDiscoverApps = useCallback(async () => {
-    if (!brief.trim()) return;
-    setAppPicker((prev) => ({ ...prev, loading: true, error: null }));
-    try {
-      const result = await client.apps.discover({ intent: brief.trim() });
-      const matches = result.data?.matches ?? [];
-      // DiscoveredApp doesn't carry icon/modality/inputSummary — those live on
-      // the full AppSummary returned by /apps. Default to null for the picker.
-      const apps: AppEntry[] = matches.map((a) => ({
-        appId: a.appId,
-        name: a.name,
-        description: a.description,
-        capabilities: a.capabilities,
-        icon: null,
-        modality: null,
-        inputSummary: null,
-      }));
-      setAppPicker((prev) => ({ ...prev, loading: false, apps, mode: 'discover', error: null }));
-    } catch (err) {
-      setAppPicker((prev) => ({
-        ...prev,
-        loading: false,
-        error: describeError(err),
-      }));
-    }
-  }, [client, brief]);
+  /**
+   * Picker search-as-you-type handler. Driven by the AppPickerPanel's debounced
+   * search input (500ms idle).
+   *
+   *   - Empty query → re-load apps.list() (cached on first expand) so user sees
+   *     the full catalog again. We still hit list() to refresh in case server-side
+   *     workspace apps changed; the call is fast and idempotent.
+   *   - Non-empty query → fire apps.discover(query) for ranked, thumbnail-rich
+   *     results scored by the new searchApps() service.
+   *
+   * Replaces the previous "Find best app" button (which used the dialog's brief
+   * as the search intent — confusing because there was no place to type a
+   * separate picker query).
+   */
+  const handlePickerSearch = useCallback(
+    async (query: string) => {
+      setAppPicker((prev) => ({ ...prev, loading: true, error: null }));
+      try {
+        if (!query) {
+          // Empty query → load all apps (list mode).
+          const result = await client.apps.list();
+          const apps: AppEntry[] = (result.data ?? []).map((a) => ({
+            appId: a.appId,
+            name: a.name,
+            description: a.description,
+            capabilities: a.capabilities,
+            icon: a.icon ?? null,
+            modality: a.modality ?? null,
+            inputSummary: a.inputSummary
+              ? `${a.inputSummary.total} input${a.inputSummary.total === 1 ? '' : 's'}`
+              : null,
+            thumbnail: (a as { thumbnail?: { url: string; type: 'image' | 'video' } | null }).thumbnail ?? null,
+          }));
+          setAppPicker((prev) => ({ ...prev, loading: false, apps, mode: 'list', error: null }));
+          return;
+        }
+
+        // Non-empty query → ranked search via discover() (server-side searchApps).
+        const result = await client.apps.discover({ intent: query });
+        const matches = result.data?.matches ?? [];
+        const apps: AppEntry[] = matches.map((a) => ({
+          appId: a.appId,
+          name: a.name,
+          description: a.description,
+          capabilities: a.capabilities,
+          icon: null,
+          modality: null,
+          inputSummary: null,
+          thumbnail: (a as { thumbnail?: { url: string; type: 'image' | 'video' } | null }).thumbnail ?? null,
+        }));
+        setAppPicker((prev) => ({ ...prev, loading: false, apps, mode: 'discover', error: null }));
+      } catch (err) {
+        setAppPicker((prev) => ({ ...prev, loading: false, error: describeError(err) }));
+      }
+    },
+    [client],
+  );
 
   // manageUrl from the cost estimate response
   const [creditsManageUrl, setCreditsManageUrl] = useState<string | null>(null);
@@ -1141,6 +1197,17 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   }, [needsInputCtx, selectedAppId, collectedInputs, options.webhookUrl, client, documentType, documentTitle, fieldName, fieldDescription]);
 
   // -- Main generate handler --
+  //
+  // STEP 1 (preview): user clicks Generate → call POST /v1/content/preview-run.
+  // Server runs the agent in PREVIEW MODE — drafts the plan WITHOUT dispatching.
+  // Returns one of:
+  //   - mode='app'          → render decision card (chosen app, drafted+missing inputs)
+  //   - mode='freestyle'    → render freestyle decision card (variants + prompts)
+  //   - mode='needs_choice' → show multi-app picker (user picks → re-run preview pinned)
+  //
+  // STEP 2 (confirm): user reviews/edits in the decision card → clicks Confirm
+  // → handleConfirmAndRun() calls POST /v1/content/run with merged inputs/recipe
+  // → server dispatches → polling proceeds as before.
 
   const handleGenerate = useCallback(async () => {
     if (!brief.trim()) return;
@@ -1149,29 +1216,30 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     const abort = new AbortController();
     abortRef.current = abort;
 
+    // 'reviewing' state shows the "Planning…" spinner while preview-run runs.
+    // After the response lands we either:
+    //   - auto-dispatch (freestyle OR app with no missing inputs) → state → 'generating'
+    //   - render the missing-inputs form (app + missing) → state stays 'reviewing'
+    //   - render the multi-app picker (needs_choice) → state stays 'reviewing'
     setState({
-      status: 'generating',
+      status: 'reviewing',
       runId: null,
       outputs: [],
       error: null,
-      progress: 0,
+      progress: null,
     });
     setNeedsInputCtx(null);
     setCollectedInputs({});
+    setPreviewResult(null);
+    setEditedInputs({});
     setTimeoutWarning(false);
     if (timeoutWarningRef.current) clearTimeout(timeoutWarningRef.current);
-    timeoutWarningRef.current = setTimeout(() => setTimeoutWarning(true), TIMEOUT_WARNING_MS);
 
     try {
       const resolvedModality =
         modality || (assetType === 'file' ? 'video' : 'image');
 
-      // -- Single call: server-side content-router agent ---------------------
-      // Send the full Sanity document + brief + UI constraints. The server
-      // agent picks the right app, drafts every input from doc context, and
-      // either starts a run (status: 'started', returns runId) or returns a
-      // ranked candidate list when it can't auto-fill (status: 'needs_choice').
-      const autoGenResult = await client.content.autoGenerate({
+      const previewResp = await client.content.previewRun({
         brief: brief.trim(),
         document: fullDocument ?? {},
         ...(fieldName ? { fieldName } : {}),
@@ -1181,133 +1249,280 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           ...(effectiveAspectRatio ? { aspectRatio: effectiveAspectRatio } : {}),
         },
         ...(selectedAppId ? { appId: selectedAppId } : {}),
-        ...(options.webhookUrl ? { webhookUrl: options.webhookUrl } : {}),
         numVariants,
       });
 
       if (abort.signal.aborted) return;
+      const data = previewResp.data;
 
-      const data = autoGenResult.data;
-      // Agent couldn't auto-pick. Surface the reason so the user can pick an
-      // app via the existing app picker and click Generate again (which pins
-      // the appId and forces strict-validated drafting on that single app).
-      if (data.status === 'needs_choice') {
-        setState((prev) => ({
-          ...prev,
-          status: 'failed',
-          error: data.reason || 'Could not auto-pick an app. Pick one manually below.',
-          progress: null,
-        }));
+      // ── Auto-dispatch path 1: freestyle ───────────────────────────────────
+      // The agent picked a freestyle recipe; trust it and run directly. The
+      // generated variants ARE the preview the user sees.
+      if (data.mode === 'freestyle') {
+        await dispatchPreview(data, {});
         return;
       }
 
-      const runId = data.runId;
-      setState((prev) => ({ ...prev, runId }));
+      // ── Auto-dispatch path 2: app with no form (agent drafted everything) ─
+      if (data.mode === 'app' && data.form.length === 0) {
+        const inputs: Record<string, unknown> = {};
+        for (const [name, drafted] of Object.entries(data.draftedInputs)) {
+          inputs[name] = drafted.value;
+        }
+        await dispatchPreview(data, inputs);
+        return;
+      }
 
-      // Persist the brand-new run to localStorage. This is the moment the
-      // (doc, field) gets a "live run" — close-and-reopen will resume from
-      // here even if polling is interrupted.
-      const mode: CachedRunMode = data.mode === 'freestyle' ? 'freestyle' : 'app';
-      persistRun({
-        runId,
-        mode,
+      // ── Form path: app with form fields ───────────────────────────────────
+      // Render MissingInputsForm. Pre-fill drafted values so the user only
+      // touches the form fields, plus seed each form field with its
+      // suggestedDefault (one-tap accept via the chip in the form).
+      if (data.mode === 'app') {
+        const initial: Record<string, unknown> = {};
+        for (const [name, drafted] of Object.entries(data.draftedInputs)) {
+          initial[name] = drafted.value;
+        }
+        for (const f of data.form) {
+          if (f.suggestedDefault) initial[f.name] = f.suggestedDefault.value;
+        }
+        setPreviewResult(data);
+        setEditedInputs(initial);
+        return;
+      }
+
+      // ── Agent-failed path: validator exhausted retries ────────────────────
+      // Agent picked an app but couldn't describe its missing inputs as a
+      // valid form even after retries. Show the failure card so the user can
+      // pick an app manually or retry with a clearer brief.
+      if (data.mode === 'agent_failed') {
+        setPreviewResult(data);
+        return;
+      }
+
+      // ── Picker path: needs_choice ─────────────────────────────────────────
+      // Multiple apps tied; render the multi-app picker via DecisionCard.
+      setPreviewResult(data);
+    } catch (err) {
+      if (abort.signal.aborted) return;
+      setState((prev) => ({
+        ...prev,
+        status: 'failed',
+        error: describeError(err),
+        progress: null,
+      }));
+    }
+    // Note: dispatchPreview is intentionally NOT in the deps — it's stable as
+    // it has no closure dependencies of its own and is wrapped in useCallback
+    // below. This keeps handleGenerate stable across re-renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    brief,
+    modality,
+    assetType,
+    fullDocument,
+    fieldName,
+    fieldDescription,
+    effectiveAspectRatio,
+    selectedAppId,
+    numVariants,
+    client,
+  ]);
+
+  /**
+   * Dispatch a preview-run result via /v1/content/run, then poll for outputs.
+   *
+   * Called from THREE places:
+   *   1. handleGenerate auto-dispatch (freestyle mode) — passed an empty inputs map
+   *   2. handleGenerate auto-dispatch (app mode, no missing) — passed agent's drafted values
+   *   3. The MissingInputsForm's "Generate" button (via handleConfirmAndRun) —
+   *      passed editedInputs from form state
+   *
+   * Takes the data directly (rather than reading from React state) so it can be
+   * called immediately after a setState without waiting for a re-render.
+   */
+  const dispatchPreview = useCallback(
+    async (preview: PreviewRunResult, inputs: Record<string, unknown>) => {
+      abortRef.current?.abort();
+      const abort = new AbortController();
+      abortRef.current = abort;
+
+      setState({
         status: 'generating',
+        runId: null,
         outputs: [],
-        progress: 0,
         error: null,
-        startedAt: Date.now(),
-        brief: brief.trim(),
-        ...(selectedAppId ? { appId: selectedAppId } : {}),
-        numVariants,
+        progress: 0,
       });
+      setTimeoutWarning(false);
+      if (timeoutWarningRef.current) clearTimeout(timeoutWarningRef.current);
+      timeoutWarningRef.current = setTimeout(() => setTimeoutWarning(true), TIMEOUT_WARNING_MS);
 
-      // Branch on `mode === 'freestyle'` — server returns this when it dispatched
-      // parallel FAL calls with no app match. Same response shape, different URL.
-      const poller = mode === 'freestyle' ? client.freestyle : client.runs;
-      const result = await poller.wait(runId, {
-        intervalMs: 3000,
-        timeoutMs: GENERATION_TIMEOUT_MS,
-        onPoll(status) {
-          if (abort.signal.aborted) return;
-          const nextProgress = progressFromStatus(status);
+      try {
+        // Build the run payload based on which mode the preview returned.
+        let runParams: RunConfirmedParams;
+        if (preview.mode === 'app') {
+          runParams = {
+            mode: 'app',
+            appId: preview.selectedApp.appId,
+            inputs,
+            rationale: preview.selectedApp.rationale,
+            ...(options.webhookUrl ? { webhookUrl: options.webhookUrl } : {}),
+          };
+        } else if (preview.mode === 'freestyle') {
+          runParams = {
+            mode: 'freestyle',
+            freestyleRecipe: {
+              modality: preview.freestylePlan.modality,
+              rationale: preview.freestylePlan.rationale,
+              variants: preview.freestylePlan.variants,
+            },
+            intent: brief.trim(),
+            numVariants,
+            ...(fieldName ? { metadata: { fieldName } } : {}),
+          };
+        } else {
+          // needs_choice — should not reach dispatchPreview; user must pick a
+          // candidate first which re-fires handleGenerate with pinnedAppId.
           setState((prev) => ({
             ...prev,
-            progress: monotonicProgress(prev.progress, nextProgress),
+            status: 'failed',
+            error: 'Pick a specific app first to continue.',
+            progress: null,
           }));
-          // Mirror progress to the run cache so a reopen mid-generation
-          // shows accurate progress immediately (before the next poll lands).
+          return;
+        }
+
+        const runResp = await client.content.run(runParams);
+        if (abort.signal.aborted) return;
+        const data = runResp.data;
+
+        const runId = data.runId;
+        setState((prev) => ({ ...prev, runId }));
+
+        const mode: CachedRunMode = data.mode === 'freestyle' ? 'freestyle' : 'app';
+        persistRun({
+          runId,
+          mode,
+          status: 'generating',
+          outputs: [],
+          progress: 0,
+          error: null,
+          startedAt: Date.now(),
+          brief: brief.trim(),
+          ...(preview.mode === 'app' ? { appId: preview.selectedApp.appId } : {}),
+          numVariants,
+        });
+
+        // Branch on `mode === 'freestyle'` — server returns this when it dispatched
+        // parallel FAL calls with no app match. Same response shape, different URL.
+        const poller = mode === 'freestyle' ? client.freestyle : client.runs;
+        const result = await poller.wait(runId, {
+          intervalMs: 3000,
+          timeoutMs: GENERATION_TIMEOUT_MS,
+          onPoll(status) {
+            if (abort.signal.aborted) return;
+            const nextProgress = progressFromStatus(status);
+            setState((prev) => ({
+              ...prev,
+              progress: monotonicProgress(prev.progress, nextProgress),
+            }));
+            // Mirror progress to the run cache so a reopen mid-generation
+            // shows accurate progress immediately (before the next poll lands).
+            updateRunCache((prev) =>
+              prev && prev.runId === runId
+                ? { ...prev, progress: monotonicProgress(prev.progress, nextProgress) }
+                : prev,
+            );
+          },
+        });
+
+        if (abort.signal.aborted) return;
+
+        if (result.data.status === 'failed') {
+          const errorMsg = failureMessageFromRun(result.data);
+          setState((prev) => ({
+            ...prev,
+            status: 'failed',
+            error: errorMsg,
+            progress: null,
+          }));
           updateRunCache((prev) =>
             prev && prev.runId === runId
-              ? { ...prev, progress: monotonicProgress(prev.progress, nextProgress) }
+              ? { ...prev, status: 'failed', error: errorMsg, progress: null }
               : prev,
           );
-        },
-      });
+          return;
+        }
 
-      if (abort.signal.aborted) return;
+        const outputs = result.data.outputs
+          .map(toGeneratedOutput)
+          .filter((o): o is GeneratedOutput => o !== null);
 
-      if (result.data.status === 'failed') {
-        const errorMsg = failureMessageFromRun(result.data);
+        setState({
+          status: 'completed',
+          runId,
+          outputs,
+          error: null,
+          progress: 100,
+        });
+        updateRunCache((prev) =>
+          prev && prev.runId === runId
+            ? { ...prev, status: 'completed', outputs, progress: 100, error: null }
+            : prev,
+        );
+
+        // Save app routing and brief to recent history
+        if (outputs.length > 0) {
+          if (selectedAppId) {
+            saveRoutedAppId(documentType, fieldName, selectedAppId);
+          }
+          saveRecentBrief(documentType, fieldName, brief, selectedAppId ?? undefined);
+          setRecentBriefsVersion((v) => v + 1);
+        }
+      } catch (err) {
+        if (abort.signal.aborted) return;
+        const isTimeout =
+          err instanceof Error && err.message.toLowerCase().includes('timed out');
+        const errorMsg = isTimeout
+          ? 'Generation timed out after 30 minutes. Please try again with a simpler brief.'
+          : describeError(err);
         setState((prev) => ({
           ...prev,
           status: 'failed',
           error: errorMsg,
           progress: null,
         }));
+        // We don't always have a stable `runId` at this point (the throw could
+        // have happened before content.run returned). updateRunCache only
+        // patches when the cached run matches, so this is safe either way.
         updateRunCache((prev) =>
-          prev && prev.runId === runId
-            ? { ...prev, status: 'failed', error: errorMsg, progress: null }
-            : prev,
+          prev ? { ...prev, status: 'failed', error: errorMsg, progress: null } : prev,
         );
-        return;
       }
+    },
+    [
+      brief,
+      selectedAppId,
+      options.webhookUrl,
+      client,
+      fieldName,
+      numVariants,
+      persistRun,
+      updateRunCache,
+      documentType,
+    ],
+  );
 
-      const outputs = result.data.outputs
-        .map(toGeneratedOutput)
-        .filter((o): o is GeneratedOutput => o !== null);
-
-      setState({
-        status: 'completed',
-        runId,
-        outputs,
-        error: null,
-        progress: 100,
-      });
-      updateRunCache((prev) =>
-        prev && prev.runId === runId
-          ? { ...prev, status: 'completed', outputs, progress: 100, error: null }
-          : prev,
-      );
-
-      // Save app routing and brief to recent history
-      if (outputs.length > 0) {
-        if (selectedAppId) {
-          saveRoutedAppId(documentType, fieldName, selectedAppId);
-        }
-        saveRecentBrief(documentType, fieldName, brief, selectedAppId ?? undefined);
-        setRecentBriefsVersion((v) => v + 1);
-      }
-    } catch (err) {
-      if (abort.signal.aborted) return;
-      const isTimeout =
-        err instanceof Error && err.message.toLowerCase().includes('timed out');
-      const errorMsg = isTimeout
-        ? 'Generation timed out after 30 minutes. Please try again with a simpler brief.'
-        : describeError(err);
-      setState((prev) => ({
-        ...prev,
-        status: 'failed',
-        error: errorMsg,
-        progress: null,
-      }));
-      // We don't always have a stable `runId` at this point (the throw could
-      // have happened before autoGenerate returned). updateRunCache only
-      // patches when the cached run matches, so this is safe either way.
-      updateRunCache((prev) =>
-        prev ? { ...prev, status: 'failed', error: errorMsg, progress: null } : prev,
-      );
-    }
-  }, [brief, modality, assetType, selectedAppId, options.webhookUrl, effectiveAspectRatio, client, fieldName, fieldDescription, fullDocument, numVariants, persistRun, updateRunCache, documentType]);
+  /**
+   * Thin wrapper called by MissingInputsForm's "Generate" button.
+   * Reads the current preview + edited inputs from React state and delegates to
+   * dispatchPreview. The auto-dispatch paths in handleGenerate call dispatchPreview
+   * directly with fresh values (avoiding setState timing issues).
+   */
+  const handleConfirmAndRun = useCallback(() => {
+    if (!previewResult) return;
+    void dispatchPreview(previewResult, editedInputs);
+  }, [previewResult, editedInputs, dispatchPreview]);
 
   // Proxy a CDN URL through transferAsset to avoid CORS issues
   const resolveAssetUrl = useCallback(
@@ -1864,124 +2079,36 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                 onClick={handleToggleAppPicker}
               />
               {appPicker.expanded ? (
-                <Card padding={3} radius={2} border>
-                  <Stack space={3}>
-                    <Flex align="center" justify="space-between">
-                      <Text size={1} weight="medium">
-                        {appPicker.mode === 'discover' ? 'Best matches for your brief' : 'Available apps'}
-                      </Text>
-                      <Button
-                        text="Find best app"
-                        icon={SearchIcon}
-                        mode="ghost"
-                        fontSize={1}
-                        padding={2}
-                        onClick={handleDiscoverApps}
-                        disabled={!brief.trim() || appPicker.loading}
-                      />
-                    </Flex>
-                    {appPicker.loading ? (
-                      <Flex align="center" justify="center" padding={3}>
-                        <Spinner />
-                      </Flex>
-                    ) : null}
-                    {appPicker.error ? (
-                      <Card padding={2} radius={2} tone="critical">
-                        <Text size={1}>{appPicker.error}</Text>
-                      </Card>
-                    ) : null}
-                    {!appPicker.loading && appPicker.apps.length > 0 ? (
-                      <>
-                        {/* Modality filter: show toggle when apps have modality metadata */}
-                        {appPicker.apps.some((a) => a.modality) && !showAllApps ? (
-                          <Flex align="center" justify="space-between">
-                            <Text size={0} muted>
-                              Filtered to {modality || (assetType === 'file' ? 'video' : 'image')} apps
-                            </Text>
-                            <Button
-                              text="Show all"
-                              mode="bleed"
-                              fontSize={0}
-                              padding={1}
-                              onClick={() => setShowAllApps(true)}
-                            />
-                          </Flex>
-                        ) : appPicker.apps.some((a) => a.modality) && showAllApps ? (
-                          <Flex align="center" justify="flex-end">
-                            <Button
-                              text="Filter by modality"
-                              mode="bleed"
-                              fontSize={0}
-                              padding={1}
-                              onClick={() => setShowAllApps(false)}
-                            />
-                          </Flex>
-                        ) : null}
-                        <Box style={{ maxHeight: 240, overflowY: 'auto' }}>
-                          <Stack space={2}>
-                            {appPicker.apps
-                              .filter((app) => {
-                                if (showAllApps || !app.modality) return true;
-                                const targetModality = modality || (assetType === 'file' ? 'video' : 'image');
-                                return app.modality === targetModality;
-                              })
-                              .map((app) => (
-                              <Card
-                                key={app.appId}
-                                padding={2}
-                                radius={2}
-                                border
-                                tone={selectedAppId === app.appId ? 'primary' : 'default'}
-                                style={{ cursor: 'pointer' }}
-                                onClick={() => handleSelectApp(app)}
-                              >
-                                <Stack space={1}>
-                                  <Flex align="center" gap={2}>
-                                    {app.icon ? (
-                                      <img
-                                        src={app.icon}
-                                        alt=""
-                                        style={{ width: 20, height: 20, borderRadius: 4, objectFit: 'cover' }}
-                                      />
-                                    ) : selectedAppId === app.appId ? (
-                                      <CheckmarkCircleIcon />
-                                    ) : null}
-                                    <Text size={1} weight="medium" style={{ flex: 1 }}>
-                                      {app.name}
-                                    </Text>
-                                    {app.capabilities?.outputFormats?.length ? (
-                                      <Text size={0} muted>
-                                        {app.capabilities.outputFormats.join(', ')}
-                                      </Text>
-                                    ) : null}
-                                  </Flex>
-                                  {app.inputSummary ? (
-                                    <Text size={0} muted>{app.inputSummary}</Text>
-                                  ) : app.description ? (
-                                    <Text size={1} muted>
-                                      {app.description}
-                                    </Text>
-                                  ) : null}
-                                </Stack>
-                              </Card>
-                            ))}
-                          </Stack>
-                        </Box>
-                      </>
-                    ) : null}
-                    {!appPicker.loading && appPicker.apps.length === 0 && !appPicker.error ? (
-                      <Text size={1} muted>No apps found.</Text>
-                    ) : null}
-                    {selectedAppId ? (
-                      <Button
-                        text="Clear selection"
-                        mode="ghost"
-                        fontSize={1}
-                        onClick={handleClearAppSelection}
-                      />
-                    ) : null}
-                  </Stack>
-                </Card>
+                <AppPickerPanel
+                  apps={appPicker.apps.map((a) => ({
+                    appId: a.appId,
+                    name: a.name,
+                    description: a.description,
+                    modality: a.modality ?? null,
+                    outputFormats: a.capabilities?.outputFormats || [],
+                    thumbnail: a.thumbnail ?? null,
+                  }))}
+                  selectedAppId={selectedAppId}
+                  mode={appPicker.mode}
+                  loading={appPicker.loading}
+                  error={appPicker.error}
+                  targetModality={modality || (assetType === 'file' ? 'video' : 'image')}
+                  onSelect={(picked) =>
+                    handleSelectApp(
+                      // The full AppEntry is in appPicker.apps; look it up by id.
+                      appPicker.apps.find((a) => a.appId === picked.appId) ?? {
+                        appId: picked.appId,
+                        name: picked.name,
+                        description: picked.description ?? null,
+                        capabilities: null,
+                        modality: picked.modality ?? null,
+                        thumbnail: picked.thumbnail ?? null,
+                      },
+                    )
+                  }
+                  onSearchSubmit={handlePickerSearch}
+                  onClearSelection={handleClearAppSelection}
+                />
               ) : null}
             </Stack>
           ) : null}
@@ -2085,7 +2212,98 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
             </Card>
           ) : null}
 
-          {/* Needs input */}
+          {/*
+           * Reviewing-state UI rules (after handleGenerate's preview-run lands):
+           *   - mode='app' AND form non-empty   → MissingInputsForm
+           *   - mode='needs_choice'             → DecisionCard (multi-app picker)
+           *   - mode='agent_failed'             → AgentFailedCard
+           *   - mode='app' AND form empty       → unreachable (auto-dispatched in handleGenerate)
+           *   - mode='freestyle'                → unreachable (auto-dispatched in handleGenerate)
+           */}
+          {state.status === 'reviewing' &&
+          previewResult?.mode === 'app' &&
+          previewResult.form.length > 0 ? (
+            <MissingInputsForm
+              appName={previewResult.selectedApp.name}
+              appRationale={previewResult.selectedApp.rationale || null}
+              form={previewResult.form}
+              values={editedInputs}
+              onChangeValue={(name, value) =>
+                setEditedInputs((prev) => ({ ...prev, [name]: value }))
+              }
+              onConfirm={handleConfirmAndRun}
+              onCancel={handleReset}
+            />
+          ) : null}
+
+          {state.status === 'reviewing' && previewResult?.mode === 'agent_failed' ? (
+            <Card padding={4} radius={2} tone="critical" border>
+              <Stack space={3}>
+                <Text size={2} weight="semibold">
+                  Couldn&apos;t draft a form for this
+                </Text>
+                <Text size={1} muted>
+                  {previewResult.reason}
+                </Text>
+                {previewResult.selectedApp ? (
+                  <Text size={1} muted>
+                    The agent had picked: <strong>{previewResult.selectedApp.name}</strong>. You
+                    can pick an app manually below or refine your brief and try again.
+                  </Text>
+                ) : null}
+                {previewResult.errors.length > 0 ? (
+                  <Card padding={2} radius={2} tone="caution">
+                    <Stack space={1}>
+                      <Text size={0} weight="medium">
+                        Validator errors:
+                      </Text>
+                      {previewResult.errors.slice(0, 5).map((e, i) => (
+                        <Text key={i} size={0} muted>
+                          {e}
+                        </Text>
+                      ))}
+                    </Stack>
+                  </Card>
+                ) : null}
+                <Inline space={2}>
+                  <Button text="Try again" tone="primary" onClick={handleGenerate} />
+                  <Button text="Cancel" mode="ghost" onClick={handleReset} />
+                </Inline>
+              </Stack>
+            </Card>
+          ) : null}
+
+          {state.status === 'reviewing' && previewResult?.mode === 'needs_choice' ? (
+            <DecisionCard
+              preview={previewResult}
+              editedInputs={editedInputs}
+              onEditInput={(name, value) =>
+                setEditedInputs((prev) => ({ ...prev, [name]: value }))
+              }
+              onConfirm={handleConfirmAndRun}
+              onCancel={handleReset}
+              onPickCandidate={(appId) => {
+                // User picked a candidate from the multi-app picker — re-fire
+                // preview-run with that appId pinned. handleGenerate reads
+                // selectedAppId, so set it and call again.
+                setSelectedAppId(appId);
+                handleGenerate();
+              }}
+              laminaClient={client}
+            />
+          ) : null}
+
+          {/* Reviewing-but-loading: while previewRun is in flight */}
+          {state.status === 'reviewing' && !previewResult ? (
+            <Card padding={4} radius={2} tone="primary">
+              <Flex align="center" gap={3}>
+                <Spinner />
+                <Text size={1}>Planning…</Text>
+              </Flex>
+            </Card>
+          ) : null}
+
+          {/* Needs input (legacy auto-generate flow — kept for back-compat) */}
           {state.status === 'needs-input' && needsInputCtx ? (
             <Card padding={3} radius={2} tone="caution" border>
               <Stack space={3}>

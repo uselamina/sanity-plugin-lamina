@@ -96,7 +96,24 @@ export interface LaminaAsset {
 
 export type AssetTypeFilter = 'all' | 'images' | 'videos';
 
-export type GenerationStatus = 'idle' | 'discovering' | 'generating' | 'needs-input' | 'completed' | 'failed';
+/**
+ * Status lifecycle:
+ *   idle           — dialog mounted, no run in flight
+ *   discovering    — searching for matching apps (legacy, kept for back-compat)
+ *   reviewing      — preview-run returned a plan; decision card shown to user
+ *   generating     — user confirmed; run dispatched, polling outputs
+ *   needs-input    — legacy auto-generate needs-input flow (kept for back-compat)
+ *   completed      — outputs ready, user picks one
+ *   failed         — preview or run errored
+ */
+export type GenerationStatus =
+  | 'idle'
+  | 'discovering'
+  | 'reviewing'
+  | 'generating'
+  | 'needs-input'
+  | 'completed'
+  | 'failed';
 
 export interface GenerationState {
   status: GenerationStatus;
