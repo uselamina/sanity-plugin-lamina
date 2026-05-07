@@ -1,6 +1,6 @@
 {
   "name": "sanity-plugin-lamina",
-  "version": "0.8.4",
+  "version": "0.9.0",
   "description": "Sanity plugin for generating media assets with Lamina — Studio UI, headless API, CLI, and webhooks",
   "keywords": [
     "sanity",
@@ -58,7 +58,7 @@
   },
   "dependencies": {
     "@sanity/client": "^6.29.1",
-    "@uselamina/sdk": "^0.3.5",
+    "@uselamina/sdk": "^0.4.0",
     "react-is": "^19.2.5"
   },
   "devDependencies": {

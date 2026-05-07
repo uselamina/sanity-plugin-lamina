@@ -33,7 +33,6 @@ import type { AssetFromSource, AssetSourceComponentProps } from 'sanity';
 import { useFormValue, useSchema } from 'sanity';
 import { useLaminaAssets } from '../lib/useLaminaAssets.js';
 import { AssetPickerGrid } from './AssetPickerGrid.js';
-import { DecisionCard } from './DecisionCard.js';
 import { AppPickerPanel } from './AppPickerPanel.js';
 import { MissingInputsForm } from './MissingInputsForm.js';
 import type { AssetTypeFilter, LaminaAsset, LaminaPreset } from '../types.js';
@@ -48,7 +47,6 @@ import type {
   PreviewRunResult,
   PreviewAppMode,
   PreviewFreestyleMode,
-  PreviewNeedsChoiceMode,
   PreviewAgentFailedMode,
   FormField,
   RunConfirmedParams,
@@ -77,6 +75,7 @@ import {
   patchDialogState,
   readDialogState,
   type CachedRunMode,
+  type PreviewCache,
   type RunCache,
 } from '../lib/dialogStore.js';
 
@@ -607,27 +606,47 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   // older than 24h come back as `run: null`, which falls through to the
   // fresh-start default. The mount-effect below verifies still-running runs
   // against the server before resuming polling.
+  //
+  // Run cache takes priority over preview cache: if a run exists, the user
+  // already moved past the form-fill step; we don't restore the form. If no
+  // run but a fresh preview exists, we hydrate state to 'reviewing' (handled
+  // alongside the previewResult / editedInputs initializers below).
   const [state, setState] = useState<GenerationState>(() => {
     const cached = readDialogState(documentId, fieldName);
     const cachedRun = cached?.run;
-    if (!cachedRun) {
-      return { status: 'idle', runId: null, outputs: [], error: null, progress: null };
+    if (cachedRun) {
+      const status: GenerationState['status'] =
+        cachedRun.status === 'generating'
+          ? 'generating'
+          : cachedRun.status === 'completed'
+            ? 'completed'
+            : cachedRun.status === 'failed'
+              ? 'failed'
+              : 'idle';
+      return {
+        status,
+        runId: cachedRun.runId,
+        outputs: cachedRun.outputs ?? [],
+        error: cachedRun.error,
+        progress: cachedRun.progress,
+      };
     }
-    const status: GenerationState['status'] =
-      cachedRun.status === 'generating'
-        ? 'generating'
-        : cachedRun.status === 'completed'
-          ? 'completed'
-          : cachedRun.status === 'failed'
-            ? 'failed'
-            : 'idle';
-    return {
-      status,
-      runId: cachedRun.runId,
-      outputs: cachedRun.outputs ?? [],
-      error: cachedRun.error,
-      progress: cachedRun.progress,
-    };
+    // No run cached. If a fresh preview snapshot exists (form-fill in progress
+    // when the dialog last closed), come back into the 'reviewing' state so
+    // MissingInputsForm renders with the user's previous values intact.
+    if (cached?.preview?.previewResult) {
+      return { status: 'reviewing', runId: null, outputs: [], error: null, progress: null };
+    }
+    return { status: 'idle', runId: null, outputs: [], error: null, progress: null };
+  });
+
+  // True iff the initial mount restored a 'generating' state from cache. Used
+  // by the resume effect to render a quieter "Checking previous run…" message
+  // until the first server fetch resolves, instead of flashing the regular
+  // generating spinner. Flips to false the moment the resume completes.
+  const [isResumingFromCache, setIsResumingFromCache] = useState<boolean>(() => {
+    const cached = readDialogState(documentId, fieldName);
+    return cached?.run?.status === 'generating';
   });
 
   // The cached `mode` field. Needed by the resume effect to know whether to
@@ -649,10 +668,29 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   // The agent drafts the plan in "preview mode" without dispatching anything.
   // The plugin shows a decision card; user reviews drafted inputs, fills missing
   // ones (one-tap suggested defaults available), then clicks "Confirm" to dispatch.
-  const [previewResult, setPreviewResult] = useState<PreviewRunResult | null>(null);
+  //
+  // Both `previewResult` and `editedInputs` are persisted via dialogStore on
+  // change (PREVIEW_TTL_MS), so a user closing the dialog mid-form-fill can
+  // come back and pick up where they left off. Hydrated from cache here when
+  // a fresh preview snapshot exists AND no run has been started.
+  const [previewResult, setPreviewResult] = useState<PreviewRunResult | null>(() => {
+    const cached = readDialogState(documentId, fieldName);
+    if (cached?.run) return null; // run takes priority — past the form
+    const pv = cached?.preview;
+    if (!pv?.previewResult) return null;
+    // Cast through `unknown` because the cache stores a structured-clone-safe
+    // shape (Record<string, unknown>) and we trust it matches PreviewRunResult
+    // — schema-versioned at the cache layer, so a stale-shape entry was
+    // already dropped by readDialogState.
+    return pv.previewResult as unknown as PreviewRunResult;
+  });
   // User-edited values — overrides what the agent drafted. Keyed by input name.
   // Includes both edits to drafted inputs AND fills for missing inputs.
-  const [editedInputs, setEditedInputs] = useState<Record<string, unknown>>({});
+  const [editedInputs, setEditedInputs] = useState<Record<string, unknown>>(() => {
+    const cached = readDialogState(documentId, fieldName);
+    if (cached?.run) return {};
+    return cached?.preview?.editedInputs ?? {};
+  });
 
   // Timeout warning (#56)
   const [timeoutWarning, setTimeoutWarning] = useState(false);
@@ -769,6 +807,30 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
 
   const abortRef = useRef<AbortController | null>(null);
 
+  // Refs for the cards that should snap into view when state transitions.
+  // We auto-scroll to these so users don't miss the spinner / variants below
+  // the fold of the dialog. Pure UX — no logic dependency.
+  const generatingCardRef = useRef<HTMLDivElement | null>(null);
+  const completedCardRef = useRef<HTMLDivElement | null>(null);
+  const reviewingCardRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    let target: HTMLDivElement | null = null;
+    if (state.status === 'generating') target = generatingCardRef.current;
+    else if (state.status === 'completed') target = completedCardRef.current;
+    else if (state.status === 'reviewing') target = reviewingCardRef.current;
+    if (!target) return;
+    // rAF lets the new card actually mount before we measure / scroll.
+    const id = requestAnimationFrame(() => {
+      try {
+        target!.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } catch {
+        // older browsers — fall back to no-op
+      }
+    });
+    return () => cancelAnimationFrame(id);
+  }, [state.status]);
+
   // ─── Run-cache helpers ─────────────────────────────────────────────────
   // Writes go through these so persistence stays in lockstep with React
   // state. They no-op when documentId/fieldName aren't both set (the
@@ -793,6 +855,39 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     [documentId, fieldName],
   );
 
+  // ─── Preview-cache helpers ───────────────────────────────────────────────
+  // The preview snapshot (`previewResult` + `editedInputs`) is persisted so
+  // a user closing the dialog mid-form-fill can come back and pick up where
+  // they left off. Persisted only while we're in the 'reviewing' state; gets
+  // cleared the moment we transition to 'generating' / 'completed' / 'failed'
+  // / 'idle' — those states are owned by the run cache, not preview.
+  const persistPreview = useCallback(
+    (preview: PreviewCache | null) => {
+      if (!documentId || !fieldName) return;
+      patchDialogState(documentId, fieldName, { preview });
+    },
+    [documentId, fieldName],
+  );
+
+  // Effect: keep preview cache in sync with in-memory previewResult + editedInputs.
+  // Only writes when in 'reviewing' state with an app-mode preview that has a
+  // non-empty form — otherwise there's nothing the user could have typed.
+  // For modes without form fields (auto-dispatch path) we don't persist; the
+  // run cache will pick up almost immediately.
+  useEffect(() => {
+    if (!documentId || !fieldName) return;
+    const isAppPreviewWithForm =
+      state.status === 'reviewing' &&
+      previewResult?.mode === 'app' &&
+      previewResult.form.length > 0;
+    if (!isAppPreviewWithForm) return;
+    persistPreview({
+      cachedAt: Date.now(),
+      previewResult: previewResult as unknown as Record<string, unknown>,
+      editedInputs,
+    });
+  }, [documentId, fieldName, state.status, previewResult, editedInputs, persistPreview]);
+
   /**
    * User-initiated "start fresh" action: wipes both brief and run cache for
    * this (doc, field), aborts any in-flight polling, and resets local state.
@@ -804,17 +899,22 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const handleClearCachedState = useCallback(() => {
     abortRef.current?.abort();
     setState({ status: 'idle', runId: null, outputs: [], error: null, progress: null });
+    setIsResumingFromCache(false);
     setNeedsInputCtx(null);
     setCollectedInputs({});
     setSelectedOutputIds(new Set());
     setTimeoutWarning(false);
     setEnhanceResult(null);
     setEnhanceLoading(false);
+    setPreviewResult(null);
+    setEditedInputs({});
     if (timeoutWarningRef.current) {
       clearTimeout(timeoutWarningRef.current);
       timeoutWarningRef.current = null;
     }
     if (documentId && fieldName) {
+      // clearDialogState wipes brief, run, AND preview from this (doc, field)
+      // entry — single localStorage write, all three sub-caches gone.
       clearDialogState(documentId, fieldName);
       setCachedRunMode(null);
     }
@@ -852,6 +952,9 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         // First: cheap GET to see current server state. If terminal, we're done.
         const fresh = await poller.get(runId);
         if (abort.signal.aborted) return;
+        // Resume verified — flip the muted "Checking previous run…" copy off.
+        // From here on the spinner card uses normal generating UX.
+        setIsResumingFromCache(false);
 
         if (fresh.data.status === 'completed' || fresh.data.status === 'failed') {
           const outputs = (fresh.data.outputs ?? [])
@@ -924,6 +1027,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         // Cache was stale (run deleted, server restarted, etc.). Reset to
         // idle and clear the cache entry — the user can hit Generate again.
         setState({ status: 'idle', runId: null, outputs: [], error: null, progress: null });
+        setIsResumingFromCache(false);
         if (documentId && fieldName) clearDialogState(documentId, fieldName);
       }
     })();
@@ -1255,20 +1359,28 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       if (abort.signal.aborted) return;
       const data = previewResp.data;
 
-      // ── Auto-dispatch path 1: freestyle ───────────────────────────────────
-      // The agent picked a freestyle recipe; trust it and run directly. The
-      // generated variants ARE the preview the user sees.
+      // ── Freestyle path: explicit confirmation before dispatch ─────────────
+      // Freestyle means no catalog app's purpose matched the brief — the agent
+      // is generating directly with image/video models. Because that costs
+      // real fal credits and can be a mis-route, we never auto-dispatch
+      // freestyle. We stash the plan, render a confirm card showing the
+      // agent's reason + variant count + model picks, and wait for the user
+      // to either Confirm (→ handleConfirmAndRun → dispatchPreview) or Cancel
+      // (→ handleReset). This is the credit-safety gate.
       if (data.mode === 'freestyle') {
-        await dispatchPreview(data, {});
+        setPreviewResult(data);
         return;
       }
 
-      // ── Auto-dispatch path 2: app with no form (agent drafted everything) ─
+      // ── App auto-dispatch path: agent has everything, no form needed ──────
+      // Stash the preview BEFORE dispatching so the generating spinner can
+      // surface "Using <App Name>" inline (visibility into agent's choice).
       if (data.mode === 'app' && data.form.length === 0) {
         const inputs: Record<string, unknown> = {};
         for (const [name, drafted] of Object.entries(data.draftedInputs)) {
           inputs[name] = drafted.value;
         }
+        setPreviewResult(data);
         await dispatchPreview(data, inputs);
         return;
       }
@@ -1299,9 +1411,14 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         return;
       }
 
-      // ── Picker path: needs_choice ─────────────────────────────────────────
-      // Multiple apps tied; render the multi-app picker via DecisionCard.
-      setPreviewResult(data);
+      // No other modes exist — the agent always picks one app or goes freestyle.
+      // Treat any unexpected mode defensively as a failure rather than a render gap.
+      setState((prev) => ({
+        ...prev,
+        status: 'failed',
+        error: 'Unexpected response from the planner. Please try again.',
+        progress: null,
+      }));
     } catch (err) {
       if (abort.signal.aborted) return;
       setState((prev) => ({
@@ -1361,10 +1478,20 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         // Build the run payload based on which mode the preview returned.
         let runParams: RunConfirmedParams;
         if (preview.mode === 'app') {
+          // Strip empty-string inputs before sending — empty means the user
+          // either left it blank or clicked "Skip — use workflow default" on a
+          // field that has a default. The server resolver falls back to the
+          // workflow's saved defaultValue when an input is not supplied.
+          const inputsToSend: Record<string, unknown> = {};
+          for (const [name, v] of Object.entries(inputs)) {
+            if (typeof v === 'string' && v.trim() === '') continue;
+            if (v === null || v === undefined) continue;
+            inputsToSend[name] = v;
+          }
           runParams = {
             mode: 'app',
             appId: preview.selectedApp.appId,
-            inputs,
+            inputs: inputsToSend,
             rationale: preview.selectedApp.rationale,
             ...(options.webhookUrl ? { webhookUrl: options.webhookUrl } : {}),
           };
@@ -1412,6 +1539,9 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
           ...(preview.mode === 'app' ? { appId: preview.selectedApp.appId } : {}),
           numVariants,
         });
+        // Run is committed — drop the form-fill snapshot. From here on the
+        // run cache is the source of truth for restoring on reopen.
+        persistPreview(null);
 
         // Branch on `mode === 'freestyle'` — server returns this when it dispatched
         // parallel FAL calls with no app match. Same response shape, different URL.
@@ -1508,6 +1638,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       fieldName,
       numVariants,
       persistRun,
+      persistPreview,
       updateRunCache,
       documentType,
     ],
@@ -1706,14 +1837,17 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     setTimeoutWarning(false);
     setEnhanceResult(null);
     setEnhanceLoading(false);
+    setPreviewResult(null);
+    setEditedInputs({});
     if (timeoutWarningRef.current) {
       clearTimeout(timeoutWarningRef.current);
       timeoutWarningRef.current = null;
     }
-    // User canceled / dismissed an in-progress or failed run — clear the
-    // run cache. We keep the brief cache so their textarea text persists.
+    // User canceled / dismissed an in-progress or failed run — clear both the
+    // run cache AND any in-flight preview snapshot. Brief cache is kept so
+    // their textarea text persists.
     if (documentId && fieldName) {
-      patchDialogState(documentId, fieldName, { run: null });
+      patchDialogState(documentId, fieldName, { run: null, preview: null });
       setCachedRunMode(null);
     }
   }, [documentId, fieldName]);
@@ -1851,16 +1985,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
             <Flex align="center" justify="space-between" gap={2}>
               <Label size={1}>Describe what you need</Label>
               {hasCachedState ? (
-                <Button
-                  text="Clear cache"
-                  icon={ResetIcon}
-                  mode="bleed"
-                  tone="default"
-                  fontSize={0}
-                  padding={2}
-                  onClick={handleClearCachedState}
-                  title="Clears the saved brief, recent prompts, and any previous results for this field."
-                />
+                <ClearWithConfirmButton onClear={handleClearCachedState} />
               ) : null}
             </Flex>
             <TextArea
@@ -2227,10 +2352,20 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
               appName={previewResult.selectedApp.name}
               appRationale={previewResult.selectedApp.rationale || null}
               form={previewResult.form}
+              warnings={previewResult.warnings}
               values={editedInputs}
               onChangeValue={(name, value) =>
                 setEditedInputs((prev) => ({ ...prev, [name]: value }))
               }
+              onConfirm={handleConfirmAndRun}
+              onCancel={handleReset}
+            />
+          ) : null}
+
+          {state.status === 'reviewing' && previewResult?.mode === 'freestyle' ? (
+            <FreestyleConfirmCard
+              preview={previewResult}
+              numVariants={numVariants}
               onConfirm={handleConfirmAndRun}
               onCancel={handleReset}
             />
@@ -2273,34 +2408,18 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
             </Card>
           ) : null}
 
-          {state.status === 'reviewing' && previewResult?.mode === 'needs_choice' ? (
-            <DecisionCard
-              preview={previewResult}
-              editedInputs={editedInputs}
-              onEditInput={(name, value) =>
-                setEditedInputs((prev) => ({ ...prev, [name]: value }))
-              }
-              onConfirm={handleConfirmAndRun}
-              onCancel={handleReset}
-              onPickCandidate={(appId) => {
-                // User picked a candidate from the multi-app picker — re-fire
-                // preview-run with that appId pinned. handleGenerate reads
-                // selectedAppId, so set it and call again.
-                setSelectedAppId(appId);
-                handleGenerate();
-              }}
-              laminaClient={client}
-            />
-          ) : null}
-
           {/* Reviewing-but-loading: while previewRun is in flight */}
           {state.status === 'reviewing' && !previewResult ? (
-            <Card padding={4} radius={2} tone="primary">
+            <div ref={reviewingCardRef}>
+            <Card padding={4} radius={3} tone="default" border>
               <Flex align="center" gap={3}>
-                <Spinner />
-                <Text size={1}>Planning…</Text>
+                <Spinner muted />
+                <Text size={1} muted>
+                  Planning the best approach…
+                </Text>
               </Flex>
             </Card>
+            </div>
           ) : null}
 
           {/* Needs input (legacy auto-generate flow — kept for back-compat) */}
@@ -2337,28 +2456,79 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
 
           {/* Progress */}
           {state.status === 'generating' ? (
-            <Card padding={4} radius={2} tone="primary">
-              <Stack space={3}>
-                <Flex align="center" gap={3}>
-                  <Spinner />
+            <div ref={generatingCardRef}>
+            <Stack space={3}>
+              {previewResult?.mode === 'app' && previewResult.warnings && previewResult.warnings.length > 0 ? (
+                <Card padding={3} radius={2} tone="caution" border>
                   <Stack space={2}>
+                    {previewResult.warnings.map((w, i) => (
+                      <Text key={`warn-${i}`} size={1}>
+                        {w.message}
+                      </Text>
+                    ))}
+                  </Stack>
+                </Card>
+              ) : null}
+            <Card padding={4} radius={3} tone="default" border>
+              <Stack space={3}>
+                {/* Inline visibility into the agent's choice — only meaningful
+                    when previewResult is set (which it is for both
+                    freestyle-confirm dispatches and app auto-dispatches). For
+                    resumed-from-cache runs we don't have previewResult, so the
+                    inline line just doesn't render. */}
+                {!isResumingFromCache &&
+                previewResult?.mode === 'app' &&
+                previewResult.selectedApp ? (
+                  <Stack space={1}>
                     <Text size={1} weight="medium">
-                      {state.progress !== null && state.progress < 20
-                        ? 'Queued...'
-                        : state.progress !== null && state.progress >= 90
-                          ? 'Finalizing...'
-                          : 'Generating...'}
+                      Using {previewResult.selectedApp.name}
                     </Text>
-                    {state.progress !== null ? (
+                    {previewResult.selectedApp.rationale ? (
+                      <Text size={1} muted>
+                        {previewResult.selectedApp.rationale}
+                      </Text>
+                    ) : null}
+                  </Stack>
+                ) : null}
+                {!isResumingFromCache &&
+                previewResult?.mode === 'freestyle' &&
+                previewResult.freestylePlan?.rationale ? (
+                  <Stack space={1}>
+                    <Text size={1} weight="medium">
+                      Generating freestyle
+                    </Text>
+                    <Text size={1} muted>
+                      {previewResult.freestylePlan.rationale}
+                    </Text>
+                  </Stack>
+                ) : null}
+                <Flex align="center" gap={3}>
+                  <Spinner muted />
+                  <Stack space={2}>
+                    <Text size={1} weight="semibold">
+                      {isResumingFromCache
+                        ? 'Checking previous run…'
+                        : state.progress !== null && state.progress < 20
+                          ? 'Queued'
+                          : state.progress !== null && state.progress >= 90
+                            ? 'Finalizing'
+                            : 'Generating'}
+                    </Text>
+                    {!isResumingFromCache && state.progress !== null ? (
                       <Text size={1} muted>
                         {state.progress}% complete
+                      </Text>
+                    ) : null}
+                    {isResumingFromCache ? (
+                      <Text size={1} muted>
+                        Reconnecting to your last generation
                       </Text>
                     ) : null}
                   </Stack>
                   <Box style={{ marginLeft: 'auto' }}>
                     <Button
                       text="Cancel"
-                      mode="ghost"
+                      mode="bleed"
                       tone="default"
                       fontSize={1}
                       padding={2}
@@ -2395,6 +2565,8 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                 ) : null}
               </Stack>
             </Card>
+            </Stack>
+            </div>
           ) : null}
 
           {/* Feedback prompt (#33) */}
@@ -2413,6 +2585,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
 
           {/* Results with side-by-side refinement */}
           {state.status === 'completed' && state.outputs.length > 0 && !feedbackState ? (
+            <div ref={completedCardRef}>
             <Stack space={3}>
               {/* Refinement panel: brief + regenerate side by side with results */}
               <Card padding={3} radius={2} border tone="transparent">
@@ -2512,10 +2685,181 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                 />
               ) : null}
             </Stack>
+            </div>
           ) : null}
         </Stack>
       </Box>
       </TabPanel>
     </Dialog>
+  );
+}
+
+// ─── Freestyle confirm card ────────────────────────────────────────────────
+//
+// Rendered when the agent returns mode='freestyle' (no catalog app's purpose
+// matches the brief). Freestyle dispatches go to fal directly and cost real
+// credits — we never auto-dispatch them. The user sees:
+//   - The agent's reason (so they know WHY freestyle was chosen).
+//   - Per-variant model picks (so they know what's about to run).
+//   - Variant count + a credit-cost note.
+//   - Confirm + Cancel buttons. Cancel = zero credits.
+//
+// This is the credit-safety gate. Combined with the agent-side prompt rule
+// that bans freestyle when an app's purpose matches, freestyle should be a
+// rare, intentional path — and when it does fire, the user sees + confirms.
+
+function FreestyleConfirmCard({
+  preview,
+  numVariants,
+  onConfirm,
+  onCancel,
+}: {
+  preview: Extract<PreviewRunResult, { mode: 'freestyle' }>;
+  numVariants: number;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const variants = Array.isArray(preview.freestylePlan?.variants)
+    ? preview.freestylePlan.variants
+    : [];
+  const variantCount = variants.length || numVariants || 1;
+  const modelPicks = variants
+    .map((v) => {
+      const im = typeof v.imageModel === 'string' ? v.imageModel : null;
+      const vm = typeof v.videoModel === 'string' ? v.videoModel : null;
+      if (im && vm) return `${im} → ${vm}`;
+      return im || vm || 'unknown';
+    })
+    .filter(Boolean);
+
+  return (
+    <Card padding={4} radius={3} tone="caution" border>
+      <Stack space={4}>
+        <Stack space={2}>
+          <Text size={2} weight="semibold">
+            No catalog app fit — generating freestyle
+          </Text>
+          {preview.freestylePlan?.rationale ? (
+            <Text size={1} muted>
+              {preview.freestylePlan.rationale}
+            </Text>
+          ) : null}
+        </Stack>
+
+        <Card padding={3} radius={2} tone="default" border>
+          <Stack space={3}>
+            <Text size={1} weight="medium">
+              Plan summary
+            </Text>
+            <Stack space={2}>
+              <Flex gap={2}>
+                <Box style={{ minWidth: 110 }}>
+                  <Text size={1} muted>
+                    Variants
+                  </Text>
+                </Box>
+                <Text size={1}>{variantCount}</Text>
+              </Flex>
+              {modelPicks.length > 0 ? (
+                <Flex gap={2}>
+                  <Box style={{ minWidth: 110 }}>
+                    <Text size={1} muted>
+                      Models
+                    </Text>
+                  </Box>
+                  <Box style={{ flex: 1 }}>
+                    <Stack space={1}>
+                      {modelPicks.map((pick, i) => (
+                        <Text key={i} size={1}>
+                          {`Variant ${i + 1}: ${pick}`}
+                        </Text>
+                      ))}
+                    </Stack>
+                  </Box>
+                </Flex>
+              ) : null}
+              <Flex gap={2}>
+                <Box style={{ minWidth: 110 }}>
+                  <Text size={1} muted>
+                    Cost
+                  </Text>
+                </Box>
+                <Text size={1} muted>
+                  Charged when you confirm. Cancel to spend zero credits.
+                </Text>
+              </Flex>
+            </Stack>
+          </Stack>
+        </Card>
+
+        <Inline space={2}>
+          <Button text="Generate" tone="primary" onClick={onConfirm} />
+          <Button text="Cancel" mode="bleed" onClick={onCancel} />
+        </Inline>
+      </Stack>
+    </Card>
+  );
+}
+
+// ─── Clear-with-confirm button ─────────────────────────────────────────────
+//
+// Two-click destructive action. Default state shows "Clear" (reset icon, bleed
+// mode). First click puts the button into a 3-second confirm window where it
+// changes copy + tone to make the destructive next-click obvious. If the user
+// doesn't click again within 3 seconds, the button silently reverts to
+// default. Second click within the window triggers `onClear` and resets state.
+//
+// Why inline: keeps the destructive UX scoped to the only place we use it
+// without spinning up a separate file/module for a 30-line component.
+
+const CLEAR_CONFIRM_WINDOW_MS = 3000;
+
+function ClearWithConfirmButton({ onClear }: { onClear: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Always cancel any pending revert when we unmount, otherwise a setState on
+  // an unmounted component can fire from the timer callback.
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const handleClick = useCallback(() => {
+    if (confirming) {
+      // Second click within the confirm window — actually clear.
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      setConfirming(false);
+      onClear();
+      return;
+    }
+    // First click — arm the confirm window.
+    setConfirming(true);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      setConfirming(false);
+      timerRef.current = null;
+    }, CLEAR_CONFIRM_WINDOW_MS);
+  }, [confirming, onClear]);
+
+  return (
+    <Button
+      text={confirming ? 'Click again to confirm' : 'Clear'}
+      icon={ResetIcon}
+      mode="bleed"
+      tone={confirming ? 'caution' : 'default'}
+      fontSize={0}
+      padding={2}
+      onClick={handleClick}
+      title={
+        confirming
+          ? 'Click again within 3 seconds to clear all saved brief, results, and form state for this field.'
+          : 'Clear saved brief, recent prompts, results, and form state for this field.'
+      }
+    />
   );
 }
