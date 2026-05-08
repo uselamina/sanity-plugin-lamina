@@ -160,12 +160,12 @@ export function AppPickerPanel({
             {searchTerm.trim() ? `No apps match "${searchTerm.trim()}".` : 'No apps found.'}
           </Text>
         ) : (
-          <Box style={{ maxHeight: 480, overflowY: 'auto' }}>
+          <Box style={{ maxHeight: 480, overflowY: 'auto', paddingRight: 4 }}>
             <Box
               style={{
                 display: 'grid',
-                gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-                gap: 8,
+                gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+                gap: 12,
               }}
             >
               {visibleApps.map((app) => (
@@ -211,26 +211,26 @@ function AppCard({
       radius={2}
       border
       tone={selected ? 'primary' : 'default'}
-      style={{ cursor: 'pointer', overflow: 'hidden' }}
+      style={{
+        cursor: 'pointer',
+        overflow: 'hidden',
+      }}
       onClick={onClick}
     >
       <ThumbnailMedia thumbnail={app.thumbnail || null} selected={selected} />
       <Box padding={3}>
-        <Stack space={3}>
-          <Flex align="center" gap={2}>
-            {selected ? <CheckmarkCircleIcon /> : null}
-            <Text size={1} weight="medium" style={{ flex: 1, lineHeight: 1.3 }}>
-              {app.name}
-            </Text>
+        <Stack space={2}>
+          <Flex align="flex-start" gap={2}>
+            <Box style={{ flex: 1, minWidth: 0 }}>
+              <Text size={1} weight="semibold">
+                {app.name}
+              </Text>
+            </Box>
+            {selected ? <CheckmarkCircleIcon style={{ flexShrink: 0 }} /> : null}
           </Flex>
           {app.description ? (
-            <Text size={1} muted textOverflow="ellipsis" style={{ lineHeight: 1.4 }}>
+            <Text size={1} muted>
               {app.description}
-            </Text>
-          ) : null}
-          {app.outputFormats?.length ? (
-            <Text size={0} muted>
-              {app.outputFormats.join(', ')}
             </Text>
           ) : null}
         </Stack>
@@ -243,21 +243,20 @@ function AppCard({
 
 function ThumbnailMedia({
   thumbnail,
-  selected,
 }: {
   thumbnail: AppPickerEntry['thumbnail'];
   selected: boolean;
 }) {
   const wrapperStyle: React.CSSProperties = {
     width: '100%',
-    aspectRatio: '3 / 4', // portrait — fits 4-up grid without dwarfing the captions
-    background: 'var(--card-muted-fg-color, rgba(0,0,0,0.05))',
+    aspectRatio: '4 / 3', // landscape-ish — caption gets enough room without dwarfing the preview
+    background:
+      'linear-gradient(135deg, rgba(0,0,0,0.04), rgba(0,0,0,0.08))',
     display: 'block',
     objectFit: 'cover',
   };
 
   if (!thumbnail) {
-    // Placeholder for cards without media — keeps the grid uniform.
     return (
       <Box
         style={{
@@ -267,21 +266,16 @@ function ThumbnailMedia({
           justifyContent: 'center',
         }}
       >
-        <Text size={0} muted>No preview</Text>
+        <Text size={0} muted style={{ opacity: 0.7 }}>
+          No preview
+        </Text>
       </Box>
     );
   }
 
   if (thumbnail.type === 'video') {
     return (
-      <video
-        src={thumbnail.url}
-        autoPlay
-        loop
-        muted
-        playsInline
-        style={wrapperStyle}
-      />
+      <video src={thumbnail.url} autoPlay loop muted playsInline style={wrapperStyle} />
     );
   }
 

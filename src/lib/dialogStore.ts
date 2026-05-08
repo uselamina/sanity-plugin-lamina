@@ -41,6 +41,15 @@ export const RUN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 export const BRIEF_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 /**
+ * Preview-state cache TTL. Preview is the post-Generate-click, pre-dispatch
+ * window where the agent has produced a plan and (sometimes) a form for the
+ * user to fill. We persist this short-term so a user who closes the dialog
+ * mid-form-fill doesn't lose what they typed. Beyond an hour, the doc may
+ * have changed enough that re-running preview is more correct than restoring.
+ */
+export const PREVIEW_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+/**
  * Hard cap on number of dialog entries. Prevents unbounded growth across
  * many docs × many fields. With ~3KB per entry, 200 entries = ~600KB —
  * a small fraction of the ~5MB localStorage budget. When over the cap we
@@ -93,12 +102,36 @@ export interface RunCache {
   numVariants?: number;
 }
 
+/**
+ * Snapshot of the post-preview, pre-dispatch state — the agent has decided
+ * which app to use and the user is mid-form (or mid-confirmation). Persisted
+ * so a user who closes the dialog while filling the form can come back and
+ * pick up where they left off.
+ *
+ * Does NOT persist for runs that auto-dispatched (no form needed) — those
+ * fall straight into the `run` cache below.
+ */
+export interface PreviewCache {
+  /** When this preview was captured. Subject to PREVIEW_TTL_MS. */
+  cachedAt: number;
+  /**
+   * Opaque structured-clone-safe payload of the SDK's PreviewRunResult.
+   * We intentionally store the whole shape so plugin code can rehydrate
+   * `previewResult` without re-running preview-run.
+   */
+  previewResult: Record<string, unknown>;
+  /** What the user has typed/picked into the form so far, keyed by field name. */
+  editedInputs: Record<string, unknown>;
+}
+
 export interface DialogState {
   v: typeof SCHEMA_VERSION;
   /** Last write time. Used for GC sweep. */
   updatedAt: number;
   brief: BriefCache | null;
   run: RunCache | null;
+  /** Pre-dispatch preview snapshot. Lost on dispatch, run completion, or cancel. */
+  preview: PreviewCache | null;
 }
 
 // ─── localStorage access guards ────────────────────────────────────────────
@@ -270,11 +303,12 @@ export function readDialogState(
 
   const state = parsed as DialogState;
 
-  // Per-field freshness checks — a stale `run` field doesn't invalidate the
-  // whole entry, just that field. Same for brief.
+  // Per-field freshness checks — a stale field doesn't invalidate the whole
+  // entry, just that field. brief, run, and preview each have their own TTL.
   const now = Date.now();
   let brief = state.brief;
   let run = state.run;
+  let preview = state.preview ?? null;
 
   if (brief && now - (brief.cachedAt ?? 0) > BRIEF_TTL_MS) {
     brief = null;
@@ -282,12 +316,16 @@ export function readDialogState(
   if (run && now - (run.startedAt ?? 0) > RUN_TTL_MS) {
     run = null;
   }
+  if (preview && now - (preview.cachedAt ?? 0) > PREVIEW_TTL_MS) {
+    preview = null;
+  }
 
   return {
     v: SCHEMA_VERSION,
     updatedAt: state.updatedAt ?? 0,
     brief,
     run,
+    preview,
   };
 }
 
@@ -301,7 +339,7 @@ export function readDialogState(
 export function patchDialogState(
   docId: string | undefined,
   fieldName: string | undefined,
-  patch: { brief?: BriefCache | null; run?: RunCache | null },
+  patch: { brief?: BriefCache | null; run?: RunCache | null; preview?: PreviewCache | null },
 ): void {
   if (!docId || !fieldName) return;
   const ls = getStorage();
@@ -315,6 +353,7 @@ export function patchDialogState(
     updatedAt: Date.now(),
     brief: 'brief' in patch ? patch.brief ?? null : existing?.brief ?? null,
     run: 'run' in patch ? patch.run ?? null : existing?.run ?? null,
+    preview: 'preview' in patch ? patch.preview ?? null : existing?.preview ?? null,
   };
 
   const ok = safeSetItem(ls, key, JSON.stringify(next));

@@ -2,37 +2,40 @@
  * MissingInputsForm
  *
  * Renders the agent-emitted form spec (FormField[]) for inputs the agent could
- * not draft. The agent decides per-field which widget the plugin should use —
- * exotic app input types (productPicker, colorPicker, aspectRatio, etc.) are
- * translated by the agent into one of these 5 kinds:
+ * not draft. The agent decides per-field which widget the plugin should use:
  *
- *   - 'text'   → <TextInput>     (free-form, with optional placeholder)
- *   - 'select' → <Select>        (small fixed value space; options come from agent)
- *   - 'image'  → URL paste       (with optional suggested-default chip)
- *   - 'video'  → URL paste       (same)
- *   - 'audio'  → URL paste       (same)
+ *   - 'text'   → <TextInput>
+ *   - 'select' → <Select>
+ *   - 'image'  → URL paste + "Upload image" (Sanity asset upload)
+ *   - 'video'  → URL paste + "Upload video"
+ *   - 'audio'  → URL paste + "Upload audio"
  *
- * This component is a pure renderer — no widget dispatching, no type collapse,
- * no fallbacks. All decisions were made upstream and validated server-side.
+ * Media kinds support BOTH a URL paste (for external assets) AND a one-click
+ * upload that pushes the chosen file to Sanity's asset CDN — the resulting
+ * CDN URL is then used as the form field value. The workflow server fetches
+ * that public URL during dispatch; no proxy needed for public datasets.
  *
- * Real Sanity asset upload (file picker → CDN URL → server downloads) is
- * deferred — for now the media kinds are URL-paste fields.
+ * The component is a pure renderer — no widget dispatching, no type collapse,
+ * no fallbacks. All widget decisions were made upstream and validated server-side.
  */
 
 import {
-  Badge,
   Box,
   Button,
   Card,
+  Flex,
   Inline,
   Label,
   Select,
+  Spinner,
   Stack,
   Text,
   TextInput,
 } from '@sanity/ui';
-import type { FormField } from '@uselamina/sdk';
-import React from 'react';
+import { CheckmarkIcon, UploadIcon, WarningOutlineIcon } from '@sanity/icons';
+import type { FormField, PreviewWarning } from '@uselamina/sdk';
+import React, { useCallback, useRef, useState } from 'react';
+import { useClient } from 'sanity';
 
 interface MissingInputsFormProps {
   /** Display name of the chosen app (shown in the form header). */
@@ -41,6 +44,12 @@ interface MissingInputsFormProps {
   appRationale: string | null;
   /** Agent-emitted form spec — one entry per input the agent couldn't draft. */
   form: FormField[];
+  /**
+   * Optional warnings the agent raised about user dialog settings the chosen
+   * app cannot honor (e.g., aspect ratio when the app's output shape is fixed).
+   * Rendered above the form as muted info notes.
+   */
+  warnings?: PreviewWarning[];
   /** Current values keyed by field name (parent owns the state). */
   values: Record<string, unknown>;
   /** Called as the user edits a field. */
@@ -55,13 +64,15 @@ export function MissingInputsForm({
   appName,
   appRationale,
   form,
+  warnings,
   values,
   onChangeValue,
   onConfirm,
   onCancel,
 }: MissingInputsFormProps) {
-  // Disable Generate until every field has a non-empty value. The form
-  // contains only required inputs (agent omits optionals), so all need filling.
+  // Every form field is here because the workflow CANNOT run without it
+  // (parameter has no default, agent couldn't infer). Generate is enabled
+  // only when every field has a non-empty value.
   const allFilled = form.every((field) => {
     const v = values[field.name];
     if (v == null) return false;
@@ -70,18 +81,24 @@ export function MissingInputsForm({
   });
 
   return (
-    <Card padding={4} radius={2} tone="primary" border>
+    <Card padding={4} radius={3} tone="default" border>
       <Stack space={4}>
         <Stack space={2}>
           <Text size={2} weight="semibold">
-            {appName} needs a few more things
+            A few more details
           </Text>
           {appRationale ? (
             <Text size={1} muted>
               {appRationale}
             </Text>
-          ) : null}
+          ) : (
+            <Text size={1} muted>
+              {appName} needs a couple of things only you can provide.
+            </Text>
+          )}
         </Stack>
+
+        <WarningsList warnings={warnings} />
 
         <Stack space={4}>
           {form.map((field) => (
@@ -96,8 +113,28 @@ export function MissingInputsForm({
 
         <Inline space={2}>
           <Button text="Generate" tone="primary" onClick={onConfirm} disabled={!allFilled} />
-          <Button text="Cancel" mode="ghost" onClick={onCancel} />
+          <Button text="Cancel" mode="bleed" onClick={onCancel} />
         </Inline>
+      </Stack>
+    </Card>
+  );
+}
+
+// ─── Warnings list (muted info notes above the form) ───────────────────────
+
+function WarningsList({ warnings }: { warnings?: PreviewWarning[] }) {
+  if (!warnings || warnings.length === 0) return null;
+  return (
+    <Card padding={3} radius={2} tone="caution" border>
+      <Stack space={2}>
+        {warnings.map((w, i) => (
+          <Flex key={`${w.field}-${i}`} align="flex-start" gap={2}>
+            <Box style={{ flexShrink: 0, paddingTop: 2 }}>
+              <WarningOutlineIcon />
+            </Box>
+            <Text size={1}>{w.message}</Text>
+          </Flex>
+        ))}
       </Stack>
     </Card>
   );
@@ -115,23 +152,25 @@ function FieldRow({
   onChange: (value: unknown) => void;
 }) {
   const stringValue = toStringInputValue(value);
-  const hasDefault = !!field.suggestedDefault;
-  const isAcceptingDefault =
-    hasDefault && stringValue === String(field.suggestedDefault!.value);
+  const hasSuggested = !!field.suggestedDefault;
+  const isAcceptingSuggested =
+    hasSuggested && stringValue === String(field.suggestedDefault!.value);
+  const isMedia = field.kind === 'image' || field.kind === 'video' || field.kind === 'audio';
 
   return (
     <Stack space={2}>
-      <Inline space={2}>
-        <Label size={1}>{field.question}</Label>
-        <Badge tone="caution" fontSize={0}>
-          required
-        </Badge>
-        {field.kind === 'image' || field.kind === 'video' || field.kind === 'audio' ? (
-          <Badge tone="default" fontSize={0}>
+      <Flex align="center" gap={2}>
+        <Box style={{ flex: 1 }}>
+          <Label size={1} muted style={{ fontWeight: 500 }}>
+            {field.question}
+          </Label>
+        </Box>
+        {isMedia ? (
+          <Text size={0} muted style={{ textTransform: 'uppercase', letterSpacing: '0.04em' }}>
             {field.kind}
-          </Badge>
+          </Text>
         ) : null}
-      </Inline>
+      </Flex>
 
       {field.kind === 'select' ? (
         <Select value={stringValue} onChange={(e) => onChange(e.currentTarget.value)}>
@@ -150,34 +189,135 @@ function FieldRow({
         />
       )}
 
-      {hasDefault ? (
-        <Box>
-          <Button
-            mode={isAcceptingDefault ? 'default' : 'ghost'}
-            tone={isAcceptingDefault ? 'positive' : 'default'}
-            fontSize={1}
-            padding={2}
-            text={
-              isAcceptingDefault
-                ? `✓ Using ${field.suggestedDefault!.label}`
-                : `Use ${field.suggestedDefault!.label}`
-            }
-            onClick={() => onChange(field.suggestedDefault!.value)}
-          />
-        </Box>
+      {/* Action row: upload (media kinds only) + suggested-default chip */}
+      {isMedia || hasSuggested ? (
+        <Inline space={2}>
+          {isMedia ? <UploadButton kind={field.kind} onUploaded={onChange} /> : null}
+          {hasSuggested ? (
+            <Button
+              mode="bleed"
+              tone={isAcceptingSuggested ? 'positive' : 'default'}
+              fontSize={1}
+              padding={2}
+              text={
+                isAcceptingSuggested
+                  ? `Using ${field.suggestedDefault!.label}`
+                  : `Use ${field.suggestedDefault!.label}`
+              }
+              icon={isAcceptingSuggested ? CheckmarkIcon : undefined}
+              onClick={() => onChange(field.suggestedDefault!.value)}
+            />
+          ) : null}
+        </Inline>
       ) : null}
     </Stack>
+  );
+}
+
+// ─── Sanity asset upload button (image/video/audio kinds) ──────────────────
+
+const ACCEPT_BY_KIND: Record<'image' | 'video' | 'audio', string> = {
+  image: 'image/*',
+  video: 'video/*',
+  audio: 'audio/*',
+};
+
+const SANITY_ASSET_TYPE_BY_KIND: Record<'image' | 'video' | 'audio', 'image' | 'file'> = {
+  image: 'image',
+  video: 'file', // Sanity stores video as a file asset
+  audio: 'file',
+};
+
+function UploadButton({
+  kind,
+  onUploaded,
+}: {
+  kind: 'image' | 'video' | 'audio';
+  onUploaded: (url: string) => void;
+}) {
+  const sanityClient = useClient({ apiVersion: '2024-01-01' });
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handlePick = useCallback(() => {
+    setError(null);
+    inputRef.current?.click();
+  }, []);
+
+  const handleFile = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      // Reset the input so picking the same file twice in a row still fires onChange.
+      e.target.value = '';
+      if (!file) return;
+      setUploading(true);
+      setError(null);
+      try {
+        const assetType = SANITY_ASSET_TYPE_BY_KIND[kind];
+        const asset = await sanityClient.assets.upload(assetType, file, {
+          filename: file.name,
+        });
+        if (asset?.url) {
+          onUploaded(asset.url);
+        } else {
+          setError('Upload succeeded but no URL was returned.');
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Upload failed.';
+        setError(message);
+      } finally {
+        setUploading(false);
+      }
+    },
+    [kind, onUploaded, sanityClient],
+  );
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        accept={ACCEPT_BY_KIND[kind]}
+        style={{ display: 'none' }}
+        onChange={handleFile}
+      />
+      <Stack space={1}>
+        <Button
+          mode="bleed"
+          fontSize={1}
+          padding={2}
+          icon={uploading ? undefined : UploadIcon}
+          text={uploading ? 'Uploading…' : `Upload ${kind}`}
+          onClick={handlePick}
+          disabled={uploading}
+        />
+        {uploading ? (
+          <Flex align="center" gap={2}>
+            <Spinner muted />
+            <Text size={0} muted>
+              Uploading to Sanity…
+            </Text>
+          </Flex>
+        ) : null}
+        {error ? (
+          <Text size={0} style={{ color: 'var(--card-badge-critical-fg-color)' }}>
+            {error}
+          </Text>
+        ) : null}
+      </Stack>
+    </>
   );
 }
 
 function placeholderFor(field: FormField): string {
   switch (field.kind) {
     case 'image':
-      return 'Paste an image URL';
+      return 'Paste an image URL or upload below';
     case 'video':
-      return 'Paste a video URL';
+      return 'Paste a video URL or upload below';
     case 'audio':
-      return 'Paste an audio URL';
+      return 'Paste an audio URL or upload below';
     case 'select':
       return '';
     case 'text':
