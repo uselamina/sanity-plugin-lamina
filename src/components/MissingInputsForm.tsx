@@ -25,7 +25,6 @@ import {
   Card,
   Flex,
   Inline,
-  Label,
   Select,
   Spinner,
   Stack,
@@ -82,8 +81,8 @@ export function MissingInputsForm({
 
   return (
     <Card padding={4} radius={3} tone="default" border>
-      <Stack space={4}>
-        <Stack space={2}>
+      <Stack space={5}>
+        <Stack space={3}>
           <Text size={2} weight="semibold">
             A few more details
           </Text>
@@ -100,14 +99,25 @@ export function MissingInputsForm({
 
         <WarningsList warnings={warnings} />
 
-        <Stack space={4}>
-          {form.map((field) => (
-            <FieldRow
+        <Stack space={5}>
+          {form.map((field, idx) => (
+            <Box
               key={field.name}
-              field={field}
-              value={values[field.name]}
-              onChange={(v) => onChangeValue(field.name, v)}
-            />
+              style={
+                idx > 0
+                  ? {
+                      paddingTop: 16,
+                      borderTop: '1px solid var(--card-border-color)',
+                    }
+                  : undefined
+              }
+            >
+              <FieldRow
+                field={field}
+                value={values[field.name]}
+                onChange={(v) => onChangeValue(field.name, v)}
+              />
+            </Box>
           ))}
         </Stack>
 
@@ -140,7 +150,21 @@ function WarningsList({ warnings }: { warnings?: PreviewWarning[] }) {
   );
 }
 
-// ─── One row per form field — pure switch on field.kind ─────────────────────
+// ─── Field rendering ────────────────────────────────────────────────────────
+//
+// Strict separation between agent data and plugin UI:
+//
+//   Agent emits:     { name, question, kind, options?, suggestedDefault? }
+//   Plugin renders:  header (label + helper + filled checkmark) + widget
+//
+// The plugin owns ALL visual decisions — label styling, helper-text demotion,
+// spacing, which widget per kind. The agent NEVER authors UI strings beyond
+// the optional natural-language `question` which the plugin chooses to render
+// as muted helper text below the label.
+//
+// FieldRow is a thin dispatcher. Each widget is a self-contained component
+// that renders one kind. Adding a new kind = adding one widget component +
+// one branch in the dispatcher.
 
 function FieldRow({
   field,
@@ -151,66 +175,173 @@ function FieldRow({
   value: unknown;
   onChange: (value: unknown) => void;
 }) {
-  const stringValue = toStringInputValue(value);
-  const hasSuggested = !!field.suggestedDefault;
-  const isAcceptingSuggested =
-    hasSuggested && stringValue === String(field.suggestedDefault!.value);
-  const isMedia = field.kind === 'image' || field.kind === 'video' || field.kind === 'audio';
+  return (
+    <Stack space={3}>
+      <FieldHeader field={field} value={value} />
+      <FieldWidget field={field} value={value} onChange={onChange} />
+    </Stack>
+  );
+}
+
+function FieldHeader({ field, value }: { field: FormField; value: unknown }) {
+  const label = prettifyFieldLabel(field.name);
+  const isFilled = typeof value === 'string' ? value.trim().length > 0 : value != null;
+  // The agent's question is supporting context, not the primary label. Hide
+  // it when it duplicates the label or is empty — the plugin decides when
+  // helper text is informative.
+  const helperText =
+    field.question && field.question.trim() && field.question.trim() !== label
+      ? field.question.trim()
+      : null;
 
   return (
     <Stack space={2}>
       <Flex align="center" gap={2}>
-        <Box style={{ flex: 1 }}>
-          <Label size={1} muted style={{ fontWeight: 500 }}>
-            {field.question}
-          </Label>
-        </Box>
-        {isMedia ? (
-          <Text size={0} muted style={{ textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-            {field.kind}
+        <Text size={1} weight="semibold">
+          {label}
+        </Text>
+        {isFilled ? (
+          <Text size={1} style={{ color: 'var(--card-badge-positive-fg-color)' }}>
+            <CheckmarkIcon />
           </Text>
         ) : null}
       </Flex>
+      {helperText ? (
+        <Text size={0} muted>
+          {helperText}
+        </Text>
+      ) : null}
+    </Stack>
+  );
+}
 
-      {field.kind === 'select' ? (
-        <Select value={stringValue} onChange={(e) => onChange(e.currentTarget.value)}>
-          <option value="">— pick one —</option>
-          {field.options.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt}
-            </option>
-          ))}
-        </Select>
-      ) : (
+function FieldWidget({
+  field,
+  value,
+  onChange,
+}: {
+  field: FormField;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  switch (field.kind) {
+    case 'image':
+    case 'video':
+    case 'audio':
+      return <MediaWidget field={field} value={value} onChange={onChange} />;
+    case 'select':
+      return <SelectWidget field={field} value={value} onChange={onChange} />;
+    case 'text':
+    default:
+      return <TextWidget field={field} value={value} onChange={onChange} />;
+  }
+}
+
+// One widget per kind. Each is self-contained and decides its own internal
+// layout. They all share the same {field, value, onChange} contract so the
+// dispatcher above is a straight switch.
+
+function MediaWidget({
+  field,
+  value,
+  onChange,
+}: {
+  field: FormField & { kind: 'image' | 'video' | 'audio' };
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const stringValue = toStringInputValue(value);
+  return (
+    <Card padding={3} radius={2} tone="transparent" border>
+      <Stack space={3}>
         <TextInput
           value={stringValue}
           onChange={(e) => onChange(e.currentTarget.value)}
           placeholder={placeholderFor(field)}
+          border={false}
         />
-      )}
+        <Flex align="center" gap={2} wrap="wrap">
+          <UploadButton kind={field.kind} onUploaded={onChange} />
+          <SuggestedDefaultButton field={field} value={value} onChange={onChange} />
+        </Flex>
+      </Stack>
+    </Card>
+  );
+}
 
-      {/* Action row: upload (media kinds only) + suggested-default chip */}
-      {isMedia || hasSuggested ? (
-        <Inline space={2}>
-          {isMedia ? <UploadButton kind={field.kind} onUploaded={onChange} /> : null}
-          {hasSuggested ? (
-            <Button
-              mode="bleed"
-              tone={isAcceptingSuggested ? 'positive' : 'default'}
-              fontSize={1}
-              padding={2}
-              text={
-                isAcceptingSuggested
-                  ? `Using ${field.suggestedDefault!.label}`
-                  : `Use ${field.suggestedDefault!.label}`
-              }
-              icon={isAcceptingSuggested ? CheckmarkIcon : undefined}
-              onClick={() => onChange(field.suggestedDefault!.value)}
-            />
-          ) : null}
-        </Inline>
-      ) : null}
+function SelectWidget({
+  field,
+  value,
+  onChange,
+}: {
+  field: FormField & { kind: 'select' };
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const stringValue = toStringInputValue(value);
+  return (
+    <Select value={stringValue} onChange={(e) => onChange(e.currentTarget.value)}>
+      <option value="">— pick one —</option>
+      {field.options.map((opt) => (
+        <option key={opt} value={opt}>
+          {opt}
+        </option>
+      ))}
+    </Select>
+  );
+}
+
+function TextWidget({
+  field,
+  value,
+  onChange,
+}: {
+  field: FormField;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const stringValue = toStringInputValue(value);
+  return (
+    <Stack space={2}>
+      <TextInput
+        value={stringValue}
+        onChange={(e) => onChange(e.currentTarget.value)}
+        placeholder={placeholderFor(field)}
+      />
+      <SuggestedDefaultButton field={field} value={value} onChange={onChange} />
     </Stack>
+  );
+}
+
+// One-tap "use suggested default" chip — only renders when the form field
+// carries a non-null suggestedDefault. Returns null otherwise so callers
+// can drop it unconditionally without spread guards.
+function SuggestedDefaultButton({
+  field,
+  value,
+  onChange,
+}: {
+  field: FormField;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  if (!field.suggestedDefault) return null;
+  const stringValue = toStringInputValue(value);
+  const isAcceptingSuggested = stringValue === String(field.suggestedDefault.value);
+  return (
+    <Button
+      mode="bleed"
+      tone={isAcceptingSuggested ? 'positive' : 'default'}
+      fontSize={1}
+      padding={2}
+      text={
+        isAcceptingSuggested
+          ? `Using ${field.suggestedDefault.label}`
+          : `Use ${field.suggestedDefault.label}`
+      }
+      icon={isAcceptingSuggested ? CheckmarkIcon : undefined}
+      onClick={() => onChange(field.suggestedDefault!.value)}
+    />
   );
 }
 
@@ -308,6 +439,16 @@ function UploadButton({
       </Stack>
     </>
   );
+}
+
+function prettifyFieldLabel(name: string): string {
+  if (!name) return '';
+  // If the name already contains spaces, it's an author-set display name
+  // (e.g., "Product image") — leave it as-is.
+  if (/\s/.test(name)) return name;
+  // Otherwise it's a snake_case / camelCase key — convert to Title Case once.
+  const spaced = name.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
 function placeholderFor(field: FormField): string {

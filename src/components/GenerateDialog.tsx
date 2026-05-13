@@ -62,7 +62,7 @@ interface CostEstimateWithManageUrl extends CostEstimate {
   credits?: { manageUrl?: string };
 }
 import { useLamina } from '../lib/LaminaContext.js';
-import { getRoutedAppId, saveRoutedAppId } from '../lib/appRouting.js';
+import { getRoutedAppId, saveRoutedAppId, clearRoutedAppId } from '../lib/appRouting.js';
 import { clearRecentBriefs, getRecentBriefs, saveRecentBrief } from '../lib/recentBriefs.js';
 import { detectAspectRatio, ASPECT_RATIO_OPTIONS } from '../lib/aspectRatio.js';
 import type { LaminaAspectRatio } from '../lib/aspectRatio.js';
@@ -754,7 +754,8 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     modality,
     assetType,
     selectedBrandId: selectedBrandId || undefined,
-    typeaheadEnabled: state.status === 'idle' || state.status === 'failed',
+    typeaheadEnabled:
+      enhanceEnabled && (state.status === 'idle' || state.status === 'failed'),
   });
 
   // Whether the textarea is showing a system-set value (initial placeholder
@@ -814,6 +815,10 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   const completedCardRef = useRef<HTMLDivElement | null>(null);
   const reviewingCardRef = useRef<HTMLDivElement | null>(null);
 
+  // Snap the relevant card into view on state transitions AND on previewResult
+  // swaps (so the scroll re-fires when reviewing's contents change from the
+  // "Planning…" spinner to the actual form / confirm card). `previewResult?.mode`
+  // covers that swap without over-firing on per-keystroke edits.
   useEffect(() => {
     let target: HTMLDivElement | null = null;
     if (state.status === 'generating') target = generatingCardRef.current;
@@ -829,7 +834,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       }
     });
     return () => cancelAnimationFrame(id);
-  }, [state.status]);
+  }, [state.status, previewResult?.mode]);
 
   // ─── Run-cache helpers ─────────────────────────────────────────────────
   // Writes go through these so persistence stays in lockstep with React
@@ -908,6 +913,11 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     setEnhanceLoading(false);
     setPreviewResult(null);
     setEditedInputs({});
+    // Clear the app routing pin too — both React state and the per-
+    // (docType, fieldName) localStorage entry — so the user starts cleanly.
+    setSelectedAppId(null);
+    setSelectedAppName(null);
+    clearRoutedAppId(documentType, fieldName);
     if (timeoutWarningRef.current) {
       clearTimeout(timeoutWarningRef.current);
       timeoutWarningRef.current = null;
@@ -1197,7 +1207,9 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
     setSelectedAppId(null);
     setSelectedAppName(null);
     setCostEstimate(null);
-  }, []);
+    // Also unpin from localStorage so it doesn't restore on next dialog open.
+    clearRoutedAppId(documentType, fieldName);
+  }, [documentType, fieldName]);
 
   // -- needsInput handler --
 
@@ -1361,14 +1373,23 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
 
       // ── Freestyle path: explicit confirmation before dispatch ─────────────
       // Freestyle means no catalog app's purpose matched the brief — the agent
-      // is generating directly with image/video models. Because that costs
-      // real fal credits and can be a mis-route, we never auto-dispatch
-      // freestyle. We stash the plan, render a confirm card showing the
-      // agent's reason + variant count + model picks, and wait for the user
-      // to either Confirm (→ handleConfirmAndRun → dispatchPreview) or Cancel
-      // (→ handleReset). This is the credit-safety gate.
+      // Freestyle path. Same branching as app: if the agent asked the user for
+      // inputs (most commonly: reference image for ref-aware models like
+      // nano-banana-pro-edit whose paramSchema declares imageUrls), show the
+      // form. Otherwise auto-dispatch.
       if (data.mode === 'freestyle') {
+        const form = (data as { form?: unknown[] }).form ?? [];
+        if (form.length > 0) {
+          const initial: Record<string, unknown> = {};
+          for (const f of form as Array<{ name: string }>) {
+            initial[f.name] = '';
+          }
+          setPreviewResult(data);
+          setEditedInputs(initial);
+          return;
+        }
         setPreviewResult(data);
+        await dispatchPreview(data, {});
         return;
       }
 
@@ -1496,12 +1517,55 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
             ...(options.webhookUrl ? { webhookUrl: options.webhookUrl } : {}),
           };
         } else if (preview.mode === 'freestyle') {
+          // Patch user-supplied form values into each variant's imageParams /
+          // videoParams. This is what makes ref-aware freestyle work: the agent
+          // emits variants with placeholder fields (e.g., imageUrls: []) AND
+          // adds the same field name to ask_user_for; the user uploads via the
+          // form; here we merge the upload URL back into the recipe before
+          // dispatch.
+          const previewWithForm = preview as unknown as {
+            form?: Array<{ name: string; kind?: string }>;
+          };
+          const askedNames = (previewWithForm.form || []).map((f) => f.name);
+          const patchedVariants = preview.freestylePlan.variants.map((v: Record<string, unknown>) => {
+            const imageParams: Record<string, unknown> = {
+              ...((v.imageParams as Record<string, unknown>) || {}),
+            };
+            const hasVideoParams = v.videoParams && typeof v.videoParams === 'object';
+            const videoParams: Record<string, unknown> | null = hasVideoParams
+              ? { ...(v.videoParams as Record<string, unknown>) }
+              : null;
+
+            for (const askName of askedNames) {
+              const value = inputs[askName];
+              if (value === undefined || value === null || value === '') continue;
+              // imageUrls is an array param — wrap a single string URL.
+              const wrap = (val: unknown) =>
+                askName === 'imageUrls' && typeof val === 'string' ? [val] : val;
+              if (askName in imageParams) {
+                imageParams[askName] = wrap(value);
+              } else if (videoParams && askName in videoParams) {
+                videoParams[askName] = wrap(value);
+              } else {
+                // Param wasn't in either params object — default to imageParams
+                // (most freestyle asks today are image references).
+                imageParams[askName] = wrap(value);
+              }
+            }
+
+            return {
+              ...v,
+              imageParams,
+              ...(videoParams ? { videoParams } : {}),
+            };
+          });
+
           runParams = {
             mode: 'freestyle',
             freestyleRecipe: {
               modality: preview.freestylePlan.modality,
               rationale: preview.freestylePlan.rationale,
-              variants: preview.freestylePlan.variants,
+              variants: patchedVariants,
             },
             intent: brief.trim(),
             numVariants,
@@ -2033,9 +2097,12 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
               </Flex>
             ) : null}
 
-            {/* "Suggested from document context" caption — shows while the
-                textarea still holds a system-set value (placeholder or AI). */}
-            {briefPreFilled ? (
+            {/* "Suggested from document context" caption — appears once a
+                system-set value is actually sitting in the textarea. Hidden
+                while the AI brief is still loading (the "Generating AI brief…"
+                row above carries that signal); showing both at once made the
+                two captions stack and contradict each other. */}
+            {briefPreFilled && briefStatus !== 'ai-loading' ? (
               <Text size={0} muted>
                 Suggested from document context
               </Text>
@@ -2345,80 +2412,85 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
            *   - mode='app' AND form empty       → unreachable (auto-dispatched in handleGenerate)
            *   - mode='freestyle'                → unreachable (auto-dispatched in handleGenerate)
            */}
-          {state.status === 'reviewing' &&
-          previewResult?.mode === 'app' &&
-          previewResult.form.length > 0 ? (
-            <MissingInputsForm
-              appName={previewResult.selectedApp.name}
-              appRationale={previewResult.selectedApp.rationale || null}
-              form={previewResult.form}
-              warnings={previewResult.warnings}
-              values={editedInputs}
-              onChangeValue={(name, value) =>
-                setEditedInputs((prev) => ({ ...prev, [name]: value }))
-              }
-              onConfirm={handleConfirmAndRun}
-              onCancel={handleReset}
-            />
-          ) : null}
-
-          {state.status === 'reviewing' && previewResult?.mode === 'freestyle' ? (
-            <FreestyleConfirmCard
-              preview={previewResult}
-              numVariants={numVariants}
-              onConfirm={handleConfirmAndRun}
-              onCancel={handleReset}
-            />
-          ) : null}
-
-          {state.status === 'reviewing' && previewResult?.mode === 'agent_failed' ? (
-            <Card padding={4} radius={2} tone="critical" border>
-              <Stack space={3}>
-                <Text size={2} weight="semibold">
-                  Couldn&apos;t draft a form for this
-                </Text>
-                <Text size={1} muted>
-                  {previewResult.reason}
-                </Text>
-                {previewResult.selectedApp ? (
-                  <Text size={1} muted>
-                    The agent had picked: <strong>{previewResult.selectedApp.name}</strong>. You
-                    can pick an app manually below or refine your brief and try again.
-                  </Text>
-                ) : null}
-                {previewResult.errors.length > 0 ? (
-                  <Card padding={2} radius={2} tone="caution">
-                    <Stack space={1}>
-                      <Text size={0} weight="medium">
-                        Validator errors:
-                      </Text>
-                      {previewResult.errors.slice(0, 5).map((e, i) => (
-                        <Text key={i} size={0} muted>
-                          {e}
-                        </Text>
-                      ))}
-                    </Stack>
-                  </Card>
-                ) : null}
-                <Inline space={2}>
-                  <Button text="Try again" tone="primary" onClick={handleGenerate} />
-                  <Button text="Cancel" mode="ghost" onClick={handleReset} />
-                </Inline>
-              </Stack>
-            </Card>
-          ) : null}
-
-          {/* Reviewing-but-loading: while previewRun is in flight */}
-          {state.status === 'reviewing' && !previewResult ? (
+          {/* Reviewing state — single wrapper owns the scroll ref so it works
+              uniformly across all four sub-states (loading, app+form,
+              freestyle, agent_failed). The scroll effect re-fires when
+              previewResult.mode changes, so the user is auto-scrolled to the
+              form when it replaces the "Planning…" spinner. */}
+          {state.status === 'reviewing' ? (
             <div ref={reviewingCardRef}>
-            <Card padding={4} radius={3} tone="default" border>
-              <Flex align="center" gap={3}>
-                <Spinner muted />
-                <Text size={1} muted>
-                  Planning the best approach…
-                </Text>
-              </Flex>
-            </Card>
+              {!previewResult ? (
+                <Card padding={4} radius={3} tone="default" border>
+                  <Flex align="center" gap={3}>
+                    <Spinner muted />
+                    <Text size={1} muted>
+                      Planning the best approach…
+                    </Text>
+                  </Flex>
+                </Card>
+              ) : previewResult.mode === 'app' && previewResult.form.length > 0 ? (
+                <MissingInputsForm
+                  appName={previewResult.selectedApp.name}
+                  appRationale={previewResult.selectedApp.rationale || null}
+                  form={previewResult.form}
+                  warnings={previewResult.warnings}
+                  values={editedInputs}
+                  onChangeValue={(name, value) =>
+                    setEditedInputs((prev) => ({ ...prev, [name]: value }))
+                  }
+                  onConfirm={handleConfirmAndRun}
+                  onCancel={handleReset}
+                />
+              ) : previewResult.mode === 'freestyle' &&
+                Array.isArray((previewResult as unknown as { form?: unknown }).form) &&
+                ((previewResult as unknown as { form: unknown[] }).form.length > 0) ? (
+                <MissingInputsForm
+                  appName="Custom generation"
+                  appRationale={previewResult.freestylePlan?.rationale || null}
+                  form={(previewResult as unknown as { form: never[] }).form}
+                  values={editedInputs}
+                  onChangeValue={(name, value) =>
+                    setEditedInputs((prev) => ({ ...prev, [name]: value }))
+                  }
+                  onConfirm={handleConfirmAndRun}
+                  onCancel={handleReset}
+                />
+              ) : previewResult.mode === 'agent_failed' ? (
+                <Card padding={4} radius={3} tone="critical" border>
+                  <Stack space={3}>
+                    <Text size={2} weight="semibold">
+                      Couldn&apos;t draft a form for this
+                    </Text>
+                    <Text size={1} muted>
+                      {previewResult.reason}
+                    </Text>
+                    {previewResult.selectedApp ? (
+                      <Text size={1} muted>
+                        The agent had picked: <strong>{previewResult.selectedApp.name}</strong>.
+                        You can pick an app manually below or refine your brief and try again.
+                      </Text>
+                    ) : null}
+                    {previewResult.errors.length > 0 ? (
+                      <Card padding={2} radius={2} tone="caution">
+                        <Stack space={1}>
+                          <Text size={0} weight="medium">
+                            Validator errors:
+                          </Text>
+                          {previewResult.errors.slice(0, 5).map((e, i) => (
+                            <Text key={i} size={0} muted>
+                              {e}
+                            </Text>
+                          ))}
+                        </Stack>
+                      </Card>
+                    ) : null}
+                    <Inline space={2}>
+                      <Button text="Try again" tone="primary" onClick={handleGenerate} />
+                      <Button text="Cancel" mode="ghost" onClick={handleReset} />
+                    </Inline>
+                  </Stack>
+                </Card>
+              ) : null}
             </div>
           ) : null}
 
@@ -2470,7 +2542,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                 </Card>
               ) : null}
             <Card padding={4} radius={3} tone="default" border>
-              <Stack space={3}>
+              <Stack space={5}>
                 {/* Inline visibility into the agent's choice — only meaningful
                     when previewResult is set (which it is for both
                     freestyle-confirm dispatches and app auto-dispatches). For
@@ -2479,8 +2551,8 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                 {!isResumingFromCache &&
                 previewResult?.mode === 'app' &&
                 previewResult.selectedApp ? (
-                  <Stack space={1}>
-                    <Text size={1} weight="medium">
+                  <Stack space={3}>
+                    <Text size={2} weight="semibold">
                       Using {previewResult.selectedApp.name}
                     </Text>
                     {previewResult.selectedApp.rationale ? (
@@ -2493,9 +2565,9 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                 {!isResumingFromCache &&
                 previewResult?.mode === 'freestyle' &&
                 previewResult.freestylePlan?.rationale ? (
-                  <Stack space={1}>
-                    <Text size={1} weight="medium">
-                      Generating freestyle
+                  <Stack space={3}>
+                    <Text size={2} weight="semibold">
+                      Composing your generation
                     </Text>
                     <Text size={1} muted>
                       {previewResult.freestylePlan.rationale}
@@ -2514,9 +2586,18 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                             ? 'Finalizing'
                             : 'Generating'}
                     </Text>
-                    {!isResumingFromCache && state.progress !== null ? (
+                    {!isResumingFromCache &&
+                    state.progress !== null &&
+                    state.progress >= 20 ? (
                       <Text size={1} muted>
                         {state.progress}% complete
+                      </Text>
+                    ) : null}
+                    {!isResumingFromCache &&
+                    state.progress !== null &&
+                    state.progress < 20 ? (
+                      <Text size={1} muted>
+                        Waiting for compute capacity…
                       </Text>
                     ) : null}
                     {isResumingFromCache ? (
@@ -2536,7 +2617,12 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                     />
                   </Box>
                 </Flex>
-                {state.progress !== null ? (
+                {/* Progress bar — only show when there's meaningful fill to draw.
+                    At 0-5% the bar would render as essentially an empty track
+                    line, which reads as visual noise rather than a progress
+                    indicator. Below the threshold the spinner + "Queued" copy
+                    carry the loading affordance. */}
+                {state.progress !== null && state.progress >= 5 ? (
                   <Box
                     style={{
                       height: 4,
@@ -2571,7 +2657,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
 
           {/* Feedback prompt (#33) */}
           {feedbackState && !feedbackState.submitted ? (
-            <Card padding={4} radius={2} tone="positive">
+            <Card padding={4} radius={3} tone="positive">
               <Stack space={3}>
                 <Text size={1} weight="medium">Asset saved! How was the result?</Text>
                 <Inline space={2}>
@@ -2691,113 +2777,6 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       </Box>
       </TabPanel>
     </Dialog>
-  );
-}
-
-// ─── Freestyle confirm card ────────────────────────────────────────────────
-//
-// Rendered when the agent returns mode='freestyle' (no catalog app's purpose
-// matches the brief). Freestyle dispatches go to fal directly and cost real
-// credits — we never auto-dispatch them. The user sees:
-//   - The agent's reason (so they know WHY freestyle was chosen).
-//   - Per-variant model picks (so they know what's about to run).
-//   - Variant count + a credit-cost note.
-//   - Confirm + Cancel buttons. Cancel = zero credits.
-//
-// This is the credit-safety gate. Combined with the agent-side prompt rule
-// that bans freestyle when an app's purpose matches, freestyle should be a
-// rare, intentional path — and when it does fire, the user sees + confirms.
-
-function FreestyleConfirmCard({
-  preview,
-  numVariants,
-  onConfirm,
-  onCancel,
-}: {
-  preview: Extract<PreviewRunResult, { mode: 'freestyle' }>;
-  numVariants: number;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  const variants = Array.isArray(preview.freestylePlan?.variants)
-    ? preview.freestylePlan.variants
-    : [];
-  const variantCount = variants.length || numVariants || 1;
-  const modelPicks = variants
-    .map((v) => {
-      const im = typeof v.imageModel === 'string' ? v.imageModel : null;
-      const vm = typeof v.videoModel === 'string' ? v.videoModel : null;
-      if (im && vm) return `${im} → ${vm}`;
-      return im || vm || 'unknown';
-    })
-    .filter(Boolean);
-
-  return (
-    <Card padding={4} radius={3} tone="caution" border>
-      <Stack space={4}>
-        <Stack space={2}>
-          <Text size={2} weight="semibold">
-            No catalog app fit — generating freestyle
-          </Text>
-          {preview.freestylePlan?.rationale ? (
-            <Text size={1} muted>
-              {preview.freestylePlan.rationale}
-            </Text>
-          ) : null}
-        </Stack>
-
-        <Card padding={3} radius={2} tone="default" border>
-          <Stack space={3}>
-            <Text size={1} weight="medium">
-              Plan summary
-            </Text>
-            <Stack space={2}>
-              <Flex gap={2}>
-                <Box style={{ minWidth: 110 }}>
-                  <Text size={1} muted>
-                    Variants
-                  </Text>
-                </Box>
-                <Text size={1}>{variantCount}</Text>
-              </Flex>
-              {modelPicks.length > 0 ? (
-                <Flex gap={2}>
-                  <Box style={{ minWidth: 110 }}>
-                    <Text size={1} muted>
-                      Models
-                    </Text>
-                  </Box>
-                  <Box style={{ flex: 1 }}>
-                    <Stack space={1}>
-                      {modelPicks.map((pick, i) => (
-                        <Text key={i} size={1}>
-                          {`Variant ${i + 1}: ${pick}`}
-                        </Text>
-                      ))}
-                    </Stack>
-                  </Box>
-                </Flex>
-              ) : null}
-              <Flex gap={2}>
-                <Box style={{ minWidth: 110 }}>
-                  <Text size={1} muted>
-                    Cost
-                  </Text>
-                </Box>
-                <Text size={1} muted>
-                  Charged when you confirm. Cancel to spend zero credits.
-                </Text>
-              </Flex>
-            </Stack>
-          </Stack>
-        </Card>
-
-        <Inline space={2}>
-          <Button text="Generate" tone="primary" onClick={onConfirm} />
-          <Button text="Cancel" mode="bleed" onClick={onCancel} />
-        </Inline>
-      </Stack>
-    </Card>
   );
 }
 
