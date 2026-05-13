@@ -58,7 +58,7 @@
   },
   "dependencies": {
     "@sanity/client": "^6.29.1",
-    "@uselamina/sdk": "^0.5.1",
+    "@uselamina/sdk": "^0.5.3",
     "react-is": "^19.2.5"
   },
   "devDependencies": {
