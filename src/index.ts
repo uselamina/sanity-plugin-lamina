@@ -6,7 +6,7 @@ export { LaminaTool } from './tool/LaminaTool.js';
 export { createRegenerateAction } from './actions/regenerateAction.js';
 export { createGenerateAllAction } from './actions/generateAllAction.js';
 export { useLamina, LaminaProvider } from './lib/LaminaContext.js';
-export { useLaminaAssets } from './lib/useLaminaAssets.js';
+export { useSanityAssets } from './lib/useSanityAssets.js';
 export { detectAspectRatio, ASPECT_RATIO_OPTIONS } from './lib/aspectRatio.js';
 export { AssetPickerGrid } from './components/AssetPickerGrid.js';
 export type {
@@ -20,6 +20,10 @@ export type {
   LaminaPluginOptions,
   LaminaPreset,
 } from './types.js';
-export type { UseLaminaAssetsOptions, UseLaminaAssetsResult } from './lib/useLaminaAssets.js';
+export type {
+  UseSanityAssetsOptions,
+  UseSanityAssetsResult,
+  AssetSourceFilter,
+} from './lib/useSanityAssets.js';
 export type { AssetPickerGridProps } from './components/AssetPickerGrid.js';
 export type { LaminaAspectRatio, DetectedAspectRatio } from './lib/aspectRatio.js';

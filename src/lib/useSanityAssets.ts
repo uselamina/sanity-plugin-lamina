@@ -4,7 +4,17 @@ import type { AssetTypeFilter, LaminaAsset } from '../types.js';
 
 const PAGE_SIZE = 24;
 
-function buildAssetQuery(filter: AssetTypeFilter, search: string, documentId?: string): string {
+/** Where the asset originated. `lamina` → only assets generated via the
+ *  plugin (carry `source.name == "lamina"` metadata). `all` → every asset
+ *  in the dataset matching the type filter, regardless of origin. */
+export type AssetSourceFilter = 'lamina' | 'all';
+
+function buildAssetQuery(
+  filter: AssetTypeFilter,
+  search: string,
+  documentId: string | undefined,
+  sourceFilter: AssetSourceFilter,
+): string {
   const typeConditions: Record<AssetTypeFilter, string> = {
     all: '_type in ["sanity.imageAsset", "sanity.fileAsset"]',
     images: '_type == "sanity.imageAsset"',
@@ -19,18 +29,24 @@ function buildAssetQuery(filter: AssetTypeFilter, search: string, documentId?: s
     ? ` && source.documentId == "${documentId}"`
     : '';
 
-  return `*[${typeConditions[filter]} && source.name == "lamina"${searchCondition}${documentCondition}] | order(_createdAt desc)`;
+  const sourceCondition = sourceFilter === 'lamina' ? ' && source.name == "lamina"' : '';
+
+  return `*[${typeConditions[filter]}${sourceCondition}${searchCondition}${documentCondition}] | order(_createdAt desc)`;
 }
 
-export interface UseLaminaAssetsOptions {
+export interface UseSanityAssetsOptions {
   typeFilter: AssetTypeFilter;
   search: string;
   pageSize?: number;
   /** When set, only return assets generated from this Sanity document. */
   documentId?: string;
+  /** Default 'lamina' — preserves the original useLaminaAssets behavior. Set
+   *  to 'all' to fetch every asset of the matching type (e.g., for the
+   *  upload-form "Browse from library" picker). */
+  sourceFilter?: AssetSourceFilter;
 }
 
-export interface UseLaminaAssetsResult {
+export interface UseSanityAssetsResult {
   assets: LaminaAsset[];
   loading: boolean;
   loadingMore: boolean;
@@ -41,8 +57,14 @@ export interface UseLaminaAssetsResult {
   totalLabel: string;
 }
 
-export function useLaminaAssets(options: UseLaminaAssetsOptions): UseLaminaAssetsResult {
-  const { typeFilter, search, pageSize = PAGE_SIZE, documentId } = options;
+export function useSanityAssets(options: UseSanityAssetsOptions): UseSanityAssetsResult {
+  const {
+    typeFilter,
+    search,
+    pageSize = PAGE_SIZE,
+    documentId,
+    sourceFilter = 'lamina',
+  } = options;
   const sanityClient = useClient({ apiVersion: '2024-01-01' });
   const [assets, setAssets] = useState<LaminaAsset[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,7 +83,7 @@ export function useLaminaAssets(options: UseLaminaAssetsOptions): UseLaminaAsset
     }
     setError(null);
     try {
-      const query = buildAssetQuery(typeFilter, search, documentId);
+      const query = buildAssetQuery(typeFilter, search, documentId, sourceFilter);
       const result = await sanityClient.fetch<LaminaAsset[]>(
         `${query} [${offset}...${offset + ps + 1}] {
           _id,
@@ -85,7 +107,7 @@ export function useLaminaAssets(options: UseLaminaAssetsOptions): UseLaminaAsset
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [sanityClient, typeFilter, search, documentId]);
+  }, [sanityClient, typeFilter, search, documentId, sourceFilter]);
 
   // Reset and fetch when filter or search changes
   useEffect(() => {
@@ -102,7 +124,11 @@ export function useLaminaAssets(options: UseLaminaAssetsOptions): UseLaminaAsset
     fetchAssets(0, false);
   }, [fetchAssets]);
 
-  const totalLabel = `${assets.length}${hasMore ? '+' : ''} Lamina asset${assets.length !== 1 ? 's' : ''}`;
+  const totalLabel = (() => {
+    const noun = sourceFilter === 'lamina' ? 'Lamina asset' : 'asset';
+    const plural = assets.length !== 1 ? 's' : '';
+    return `${assets.length}${hasMore ? '+' : ''} ${noun}${plural}`;
+  })();
 
   return {
     assets,

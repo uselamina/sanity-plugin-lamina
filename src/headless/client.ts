@@ -227,7 +227,11 @@ class LaminaSanityClientImpl implements LaminaSanityClient {
     };
 
     const createResult = await this.lamina.content.create(createParams);
-    const runId = createResult.data.runId;
+    // SDK returns a discriminated union; `needs_input` mode has no runId —
+    // for headless callers there's no form UI, so treat it as a soft failure
+    // pointing the caller back to refine the brief.
+    const createData = createResult.data as { runId?: string; status?: string };
+    const runId = createData.runId;
 
     if (!runId) {
       return {

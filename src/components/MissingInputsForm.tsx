@@ -23,6 +23,8 @@ import {
   Box,
   Button,
   Card,
+  Checkbox,
+  Dialog,
   Flex,
   Inline,
   Select,
@@ -31,7 +33,16 @@ import {
   Text,
   TextInput,
 } from '@sanity/ui';
-import { CheckmarkIcon, UploadIcon, WarningOutlineIcon } from '@sanity/icons';
+import {
+  CheckmarkIcon,
+  ImagesIcon,
+  SearchIcon,
+  UploadIcon,
+  WarningOutlineIcon,
+} from '@sanity/icons';
+import { useSanityAssets } from '../lib/useSanityAssets.js';
+import { AssetPickerGrid } from './AssetPickerGrid.js';
+import type { LaminaAsset } from '../types.js';
 import type { FormField, PreviewWarning } from '@uselamina/sdk';
 import React, { useCallback, useRef, useState } from 'react';
 import { useClient } from 'sanity';
@@ -231,6 +242,8 @@ function FieldWidget({
       return <MediaWidget field={field} value={value} onChange={onChange} />;
     case 'select':
       return <SelectWidget field={field} value={value} onChange={onChange} />;
+    case 'multiSelect':
+      return <MultiSelectWidget field={field} value={value} onChange={onChange} />;
     case 'text':
     default:
       return <TextWidget field={field} value={value} onChange={onChange} />;
@@ -251,6 +264,9 @@ function MediaWidget({
   onChange: (value: unknown) => void;
 }) {
   const stringValue = toStringInputValue(value);
+  // Browse-library is supported for image + video (audio assets in Sanity are
+  // rare and the picker grid isn't wired for audio thumbnails yet).
+  const canBrowse = field.kind === 'image' || field.kind === 'video';
   return (
     <Card padding={3} radius={2} tone="transparent" border>
       <Stack space={3}>
@@ -262,6 +278,12 @@ function MediaWidget({
         />
         <Flex align="center" gap={2} wrap="wrap">
           <UploadButton kind={field.kind} onUploaded={onChange} />
+          {canBrowse ? (
+            <BrowsePickerButton
+              kind={field.kind as 'image' | 'video'}
+              onPicked={onChange}
+            />
+          ) : null}
           <SuggestedDefaultButton field={field} value={value} onChange={onChange} />
         </Flex>
       </Stack>
@@ -288,6 +310,69 @@ function SelectWidget({
         </option>
       ))}
     </Select>
+  );
+}
+
+// MultiSelectWidget — checkbox group capped at `field.max`. Value is the
+// array of currently-checked option labels. Used today for output selection
+// (the agent asks "which outputs?" via the reserved __outputs name; the
+// user's picks are routed into `runParams.outputs[]` by dispatchPreview).
+//
+// Unchecked rows are disabled once `value.length >= max` so the user can't
+// exceed the cap. Re-clicking a checked row always works (drops the entry).
+function MultiSelectWidget({
+  field,
+  value,
+  onChange,
+}: {
+  field: FormField & { kind: 'multiSelect' };
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const selected: string[] = Array.isArray(value)
+    ? value.filter((v): v is string => typeof v === 'string')
+    : [];
+  const selectedSet = new Set(selected);
+  const max = typeof field.max === 'number' && field.max > 0 ? field.max : null;
+  const atCap = max !== null && selected.length >= max;
+
+  const toggle = (opt: string) => {
+    if (selectedSet.has(opt)) {
+      onChange(selected.filter((s) => s !== opt));
+    } else {
+      if (atCap) return; // ignore — UI also disables this row
+      onChange([...selected, opt]);
+    }
+  };
+
+  return (
+    <Card padding={3} radius={2} tone="transparent" border>
+      <Stack space={3}>
+        {max !== null ? (
+          <Text size={0} muted>
+            Pick up to {max} ({selected.length}/{max} selected)
+          </Text>
+        ) : null}
+        <Stack space={2}>
+          {field.options.map((opt) => {
+            const checked = selectedSet.has(opt);
+            const disabled = !checked && atCap;
+            return (
+              <Flex key={opt} align="center" gap={2}>
+                <Checkbox
+                  checked={checked}
+                  disabled={disabled}
+                  onChange={() => toggle(opt)}
+                />
+                <Text size={1} muted={disabled}>
+                  {opt}
+                </Text>
+              </Flex>
+            );
+          })}
+        </Stack>
+      </Stack>
+    </Card>
   );
 }
 
@@ -437,6 +522,109 @@ function UploadButton({
           </Text>
         ) : null}
       </Stack>
+    </>
+  );
+}
+
+// ─── Browse-library picker (image/video kinds) ─────────────────────────────
+//
+// Opens a Dialog containing the same AssetPickerGrid + search the main
+// GenerateDialog's "From library" tab uses, but scoped to ALL assets in the
+// dataset (not just Lamina-generated ones). Picking an asset fills the field
+// with its CDN URL — no re-upload needed.
+//
+// Reuses `useSanityAssets` (the renamed `useLaminaAssets`) with
+// `sourceFilter: 'all'` and `AssetPickerGrid` for rendering.
+
+function BrowsePickerButton({
+  kind,
+  onPicked,
+}: {
+  kind: 'image' | 'video';
+  onPicked: (url: string) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const typeFilter = kind === 'image' ? 'images' : 'videos';
+  const {
+    assets,
+    loading,
+    loadingMore,
+    hasMore,
+    error,
+    loadMore,
+    totalLabel,
+  } = useSanityAssets({
+    typeFilter,
+    search,
+    sourceFilter: 'all',
+  });
+
+  const handleSelect = useCallback(
+    (asset: LaminaAsset) => {
+      onPicked(asset.url);
+      setIsOpen(false);
+      setSearch('');
+    },
+    [onPicked],
+  );
+
+  const handleClose = useCallback(() => {
+    setIsOpen(false);
+    setSearch('');
+  }, []);
+
+  return (
+    <>
+      <Button
+        mode="bleed"
+        fontSize={1}
+        padding={2}
+        icon={ImagesIcon}
+        text={`Browse ${kind}s`}
+        onClick={() => setIsOpen(true)}
+      />
+      {isOpen ? (
+        <Dialog
+          id="lamina-browse-picker"
+          header={`Pick ${kind} from your library`}
+          onClose={handleClose}
+          width={2}
+        >
+          <Box padding={4}>
+            <Stack space={3}>
+              <TextInput
+                icon={SearchIcon}
+                value={search}
+                onChange={(e) => setSearch(e.currentTarget.value)}
+                placeholder="Search by filename…"
+                fontSize={1}
+              />
+              <Text size={0} muted>
+                {totalLabel}
+              </Text>
+              {error ? (
+                <Text size={1} style={{ color: 'var(--card-badge-critical-fg-color)' }}>
+                  {error}
+                </Text>
+              ) : (
+                <Box style={{ maxHeight: 400, overflowY: 'auto' }}>
+                  <AssetPickerGrid
+                    assets={assets}
+                    loading={loading}
+                    loadingMore={loadingMore}
+                    hasMore={hasMore}
+                    columns={3}
+                    onSelect={handleSelect}
+                    onLoadMore={loadMore}
+                    emptyMessage={`No ${kind}s in this dataset yet.`}
+                  />
+                </Box>
+              )}
+            </Stack>
+          </Box>
+        </Dialog>
+      ) : null}
     </>
   );
 }

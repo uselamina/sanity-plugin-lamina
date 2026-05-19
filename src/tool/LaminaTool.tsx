@@ -17,7 +17,7 @@ import { LaunchIcon, ResetIcon, SearchIcon } from '@sanity/icons';
 import { useClient } from 'sanity';
 import { useLamina } from '../lib/LaminaContext.js';
 import { getDocumentContext } from '../lib/documentContext.js';
-import { useLaminaAssets } from '../lib/useLaminaAssets.js';
+import { useSanityAssets } from '../lib/useSanityAssets.js';
 import { AssetPickerGrid } from '../components/AssetPickerGrid.js';
 import type { AssetTypeFilter } from '../types.js';
 const LAMINA_ORIGIN = 'https://app.uselamina.ai';
@@ -214,7 +214,7 @@ function AssetBrowser() {
     loadMore,
     refresh,
     totalLabel,
-  } = useLaminaAssets({ typeFilter, search });
+  } = useSanityAssets({ typeFilter, search });
 
   if (error) {
     return (

@@ -220,7 +220,12 @@ export function createGenerateAllAction(): DocumentActionComponent {
           const createResult = await client.content.create(createParams);
           if (abort.signal.aborted) return;
 
-          const runId = createResult.data.runId;
+          // SDK now returns a discriminated union — `needs_input` mode has no
+          // runId (waits on caller to supply the missing inputs). Bulk
+          // generation can't render a per-field form, so treat needs_input as
+          // a soft failure that asks the user to add detail to the brief.
+          const data = createResult.data as { runId?: string; status?: string };
+          const runId = data.runId;
           if (!runId) {
             setFieldStates((prev) =>
               prev.map((s) =>

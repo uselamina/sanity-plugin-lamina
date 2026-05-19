@@ -31,7 +31,7 @@ import {
 } from '@sanity/icons';
 import type { AssetFromSource, AssetSourceComponentProps } from 'sanity';
 import { useFormValue, useSchema } from 'sanity';
-import { useLaminaAssets } from '../lib/useLaminaAssets.js';
+import { useSanityAssets } from '../lib/useSanityAssets.js';
 import { AssetPickerGrid } from './AssetPickerGrid.js';
 import { AppPickerPanel } from './AppPickerPanel.js';
 import { MissingInputsForm } from './MissingInputsForm.js';
@@ -787,7 +787,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
   );
   const [librarySearch, setLibrarySearch] = useState('');
   const [libraryDocFilter, setLibraryDocFilter] = useState(false);
-  const libraryAssets = useLaminaAssets({
+  const libraryAssets = useSanityAssets({
     typeFilter: libraryFilter,
     search: librarySearch,
     pageSize: 12,
@@ -1409,14 +1409,20 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
       // ── Form path: app with form fields ───────────────────────────────────
       // Render MissingInputsForm. Pre-fill drafted values so the user only
       // touches the form fields, plus seed each form field with its
-      // suggestedDefault (one-tap accept via the chip in the form).
+      // suggestedDefault (one-tap accept via the chip in the form). For
+      // multi-select fields (output selection) initialize as an empty array
+      // so the checkbox group starts unchecked.
       if (data.mode === 'app') {
         const initial: Record<string, unknown> = {};
         for (const [name, drafted] of Object.entries(data.draftedInputs)) {
           initial[name] = drafted.value;
         }
         for (const f of data.form) {
-          if (f.suggestedDefault) initial[f.name] = f.suggestedDefault.value;
+          if (f.kind === 'multiSelect') {
+            initial[f.name] = [];
+          } else if (f.suggestedDefault) {
+            initial[f.name] = f.suggestedDefault.value;
+          }
         }
         setPreviewResult(data);
         setEditedInputs(initial);
@@ -1499,12 +1505,39 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
         // Build the run payload based on which mode the preview returned.
         let runParams: RunConfirmedParams;
         if (preview.mode === 'app') {
+          // Output selection. Two sources, in priority order:
+          //   1. User picks from the __outputs multi-select widget (if the
+          //      agent asked) → the form value lives under "__outputs".
+          //   2. Agent's confident pick from preview.selectedOutputs (no ask).
+          //   3. Neither → omit, run all outputs (today's default).
+          // The `__outputs` key never reaches `inputs` — it's an output
+          // selection, not an app parameter.
+          const OUTPUTS_KEY = '__outputs';
+          const formOutputs = inputs[OUTPUTS_KEY];
+          const outputsFromForm = Array.isArray(formOutputs)
+            ? (formOutputs.filter((v) => typeof v === 'string') as string[])
+            : undefined;
+          const previewWithOutputs = preview as unknown as {
+            selectedOutputs?: string[] | null;
+          };
+          const agentSelected = Array.isArray(previewWithOutputs.selectedOutputs)
+            ? previewWithOutputs.selectedOutputs
+            : undefined;
+          const outputs =
+            outputsFromForm && outputsFromForm.length > 0
+              ? outputsFromForm
+              : agentSelected && agentSelected.length > 0
+                ? agentSelected
+                : undefined;
+
           // Strip empty-string inputs before sending — empty means the user
           // either left it blank or clicked "Skip — use workflow default" on a
           // field that has a default. The server resolver falls back to the
           // workflow's saved defaultValue when an input is not supplied.
+          // Also strip the reserved __outputs key (handled above).
           const inputsToSend: Record<string, unknown> = {};
           for (const [name, v] of Object.entries(inputs)) {
+            if (name === OUTPUTS_KEY) continue;
             if (typeof v === 'string' && v.trim() === '') continue;
             if (v === null || v === undefined) continue;
             inputsToSend[name] = v;
@@ -1515,6 +1548,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
             inputs: inputsToSend,
             rationale: preview.selectedApp.rationale,
             ...(options.webhookUrl ? { webhookUrl: options.webhookUrl } : {}),
+            ...(outputs ? { outputs } : {}),
           };
         } else if (preview.mode === 'freestyle') {
           // Patch user-supplied form values into each variant's imageParams /
@@ -2597,7 +2631,7 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                     state.progress !== null &&
                     state.progress < 20 ? (
                       <Text size={1} muted>
-                        Waiting for compute capacity…
+                        Just a moment, starting up shortly…
                       </Text>
                     ) : null}
                     {isResumingFromCache ? (
