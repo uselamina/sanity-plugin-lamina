@@ -2596,17 +2596,10 @@ export function GenerateDialog(props: AssetSourceComponentProps) {
                     ) : null}
                   </Stack>
                 ) : null}
-                {!isResumingFromCache &&
-                previewResult?.mode === 'freestyle' &&
-                previewResult.freestylePlan?.rationale ? (
-                  <Stack space={3}>
-                    <Text size={2} weight="semibold">
-                      Composing your generation
-                    </Text>
-                    <Text size={1} muted>
-                      {previewResult.freestylePlan.rationale}
-                    </Text>
-                  </Stack>
+                {!isResumingFromCache && previewResult?.mode === 'freestyle' ? (
+                  <Text size={2} weight="semibold">
+                    Composing your generation
+                  </Text>
                 ) : null}
                 <Flex align="center" gap={3}>
                   <Spinner muted />
